@@ -30,11 +30,15 @@ kcptun/
 ## Building
 
 ```bash
-# Build client
-go build -o client/client ./client/
+# Build client with version injection
+go build -ldflags "-X main.VERSION=$(git describe --tags)" -o client/client ./client/
 
-# Build server
-go build -o server/server ./server/
+# Build server with version injection
+go build -ldflags "-X main.VERSION=$(git describe --tags)" -o server/server ./server/
+
+# Cross-compile for Linux
+GOOS=linux GOARCH=amd64 go build -ldflags "-X main.VERSION=$(git describe --tags)" -o client_linux_amd64 ./client/
+GOOS=linux GOARCH=amd64 go build -ldflags "-X main.VERSION=$(git describe --tags)" -o server_linux_amd64 ./server/
 ```
 
 ## Usage
