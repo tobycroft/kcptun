@@ -25,5 +25,6 @@ _testmain.go
 client/client
 server/server
 build/*
+dist/
 .DS_Store
 *Zone.Identifier
