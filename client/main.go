@@ -226,6 +226,30 @@ func main() {
 			Name:  "pprof",
 			Usage: "start profiling server on :6060",
 		},
+		cli.BoolFlag{
+			Name:  "losstest",
+			Usage: "run a one-shot OOB packet loss test against the server and exit",
+		},
+		cli.IntFlag{
+			Name:  "losstest-duration",
+			Value: 30,
+			Usage: "loss test duration in seconds(1-300)",
+		},
+		cli.StringFlag{
+			Name:  "losstest-rate",
+			Value: "mid",
+			Usage: "loss test send rate: low(100pps), mid(1000pps), full(unlimited)",
+		},
+		cli.IntFlag{
+			Name:  "losstest-size",
+			Value: 64,
+			Usage: "loss test OOB payload size in bytes(32-1024)",
+		},
+		cli.IntFlag{
+			Name:  "losstest-pps",
+			Value: 20000,
+			Usage: "packet per second ceiling used by the full loss test rate",
+		},
 	}
 	myApp.Action = func(c *cli.Context) error {
 		config := Config{}
@@ -264,6 +288,11 @@ func main() {
 		config.QPP = c.Bool("QPP")
 		config.QPPCount = c.Int("QPPCount")
 		config.CloseWait = c.Int("closewait")
+		config.LossTest = c.Bool("losstest")
+		config.LossTestDuration = c.Int("losstest-duration")
+		config.LossTestRate = c.String("losstest-rate")
+		config.LossTestSize = c.Int("losstest-size")
+		config.LossTestPPS = c.Int("losstest-pps")
 
 		if c.String("c") != "" {
 			err := parseJSONConfig(&config, c.String("c"))
@@ -287,6 +316,18 @@ func main() {
 			config.NoDelay, config.Interval, config.Resend, config.NoCongestion = 1, 20, 2, 1
 		case "fast3":
 			config.NoDelay, config.Interval, config.Resend, config.NoCongestion = 1, 10, 2, 1
+		}
+
+		if config.LossTest {
+			log.Println("version:", VERSION)
+			log.Println("initiating key derivation")
+			pass := pbkdf2.Key([]byte(config.Key), []byte(SALT), 4096, 32, sha1.New)
+			block, _ := newBlockCrypt(config.Crypt, pass)
+			if err := runLossTest(&config, block); err != nil {
+				log.Println(err)
+				os.Exit(1)
+			}
+			return nil
 		}
 
 		log.Println("version:", VERSION)
@@ -372,37 +413,7 @@ func main() {
 		pass := pbkdf2.Key([]byte(config.Key), []byte(SALT), 4096, 32, sha1.New)
 		log.Println("key derivation done")
 		var block kcp.BlockCrypt
-		switch config.Crypt {
-		case "null":
-			block = nil
-		case "sm4":
-			block, _ = kcp.NewSM4BlockCrypt(pass[:16])
-		case "tea":
-			block, _ = kcp.NewTEABlockCrypt(pass[:16])
-		case "xor":
-			block, _ = kcp.NewSimpleXORBlockCrypt(pass)
-		case "none":
-			block, _ = kcp.NewNoneBlockCrypt(pass)
-		case "aes-128":
-			block, _ = kcp.NewAESBlockCrypt(pass[:16])
-		case "aes-192":
-			block, _ = kcp.NewAESBlockCrypt(pass[:24])
-		case "blowfish":
-			block, _ = kcp.NewBlowfishBlockCrypt(pass)
-		case "twofish":
-			block, _ = kcp.NewTwofishBlockCrypt(pass)
-		case "cast5":
-			block, _ = kcp.NewCast5BlockCrypt(pass[:16])
-		case "3des":
-			block, _ = kcp.NewTripleDESBlockCrypt(pass[:24])
-		case "xtea":
-			block, _ = kcp.NewXTEABlockCrypt(pass[:16])
-		case "salsa20":
-			block, _ = kcp.NewSalsa20BlockCrypt(pass)
-		default:
-			config.Crypt = "aes"
-			block, _ = kcp.NewAESBlockCrypt(pass)
-		}
+		block, config.Crypt = newBlockCrypt(config.Crypt, pass)
 
 		createConn := func() (*smux.Session, error) {
 			kcpconn, err := dial(&config, block)
@@ -559,6 +570,44 @@ func handleClient(_Q_ *qpp.QuantumPermutationPad, seed []byte, session *smux.Ses
 	if err2 != nil && err2 != io.EOF && !errors.Is(err2, net.ErrClosed) {
 		logln("pipe:", err2, "in:", p1.RemoteAddr(), "out:", fmt.Sprint(p2.RemoteAddr(), "(", p2.ID(), ")"))
 	}
+}
+
+// newBlockCrypt creates the block crypt for the given name and normalizes
+// unsupported names to aes.
+func newBlockCrypt(crypt string, pass []byte) (kcp.BlockCrypt, string) {
+	var block kcp.BlockCrypt
+	switch crypt {
+	case "null":
+		block = nil
+	case "sm4":
+		block, _ = kcp.NewSM4BlockCrypt(pass[:16])
+	case "tea":
+		block, _ = kcp.NewTEABlockCrypt(pass[:16])
+	case "xor":
+		block, _ = kcp.NewSimpleXORBlockCrypt(pass)
+	case "none":
+		block, _ = kcp.NewNoneBlockCrypt(pass)
+	case "aes-128":
+		block, _ = kcp.NewAESBlockCrypt(pass[:16])
+	case "aes-192":
+		block, _ = kcp.NewAESBlockCrypt(pass[:24])
+	case "blowfish":
+		block, _ = kcp.NewBlowfishBlockCrypt(pass)
+	case "twofish":
+		block, _ = kcp.NewTwofishBlockCrypt(pass)
+	case "cast5":
+		block, _ = kcp.NewCast5BlockCrypt(pass[:16])
+	case "3des":
+		block, _ = kcp.NewTripleDESBlockCrypt(pass[:24])
+	case "xtea":
+		block, _ = kcp.NewXTEABlockCrypt(pass[:16])
+	case "salsa20":
+		block, _ = kcp.NewSalsa20BlockCrypt(pass)
+	default:
+		crypt = "aes"
+		block, _ = kcp.NewAESBlockCrypt(pass)
+	}
+	return block, crypt
 }
 
 func checkError(err error) {

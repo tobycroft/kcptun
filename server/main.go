@@ -372,6 +372,7 @@ func main() {
 				log.Println("SetWriteBuffer:", err)
 			}
 
+			var lossEchoOnce sync.Once
 			for {
 				if conn, err := lis.AcceptKCP(); err == nil {
 					log.Println("remote address:", conn.RemoteAddr())
@@ -381,6 +382,12 @@ func main() {
 					conn.SetMtu(config.MTU)
 					conn.SetWindowSize(config.SndWnd, config.RcvWnd)
 					conn.SetACKNoDelay(config.AckNodelay)
+					// Echo OOB loss-test probes so clients can measure the raw UDP path.
+					if err := std.RegisterLossTestEcho(conn); err != nil {
+						lossEchoOnce.Do(func() {
+							log.Println("loss test echo disabled (FEC is required):", err)
+						})
+					}
 
 					if config.NoComp {
 						go handleMux(_Q_, conn, &config)

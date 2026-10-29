@@ -44,6 +44,13 @@ type Config struct {
 	QPP           bool   `json:"qpp"`
 	QPPCount      int    `json:"qpp-count"`
 	CloseWait     int    `json:"closewait"`
+
+	// LossTest runs a one-shot OOB loss test against the server and exits.
+	LossTest         bool   `json:"losstest"`
+	LossTestDuration int    `json:"losstest-duration"`
+	LossTestRate     string `json:"losstest-rate"`
+	LossTestSize     int    `json:"losstest-size"`
+	LossTestPPS      int    `json:"losstest-pps"`
 }
 
 func parseJSONConfig(config *Config, path string) error {
