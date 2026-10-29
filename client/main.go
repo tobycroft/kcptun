@@ -8,10 +8,12 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"math/rand"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/pbkdf2"
@@ -91,12 +93,17 @@ func main() {
 		cli.IntFlag{
 			Name:  "autoexpire",
 			Value: 0,
-			Usage: "set auto expiration time(in seconds) for a single UDP connection, 0 to disable",
+			Usage: "set auto expiration time(in seconds) for a single UDP connection, 0 to disable, also the lower bound of autoexpiremax",
+		},
+		cli.IntFlag{
+			Name:  "autoexpiremax",
+			Value: 0,
+			Usage: "set the maximum auto expiration time(in seconds), expiration is randomly chosen between autoexpire and autoexpiremax",
 		},
 		cli.IntFlag{
 			Name:  "scavengettl",
-			Value: 600,
-			Usage: "set how long an expired connection can live (in seconds)",
+			Value: 0,
+			Usage: "force close a retired connection after N seconds even if it still carries streams, 0 to never force close",
 		},
 		cli.IntFlag{
 			Name:  "mtu",
@@ -229,6 +236,7 @@ func main() {
 		config.Mode = c.String("mode")
 		config.Conn = c.Int("conn")
 		config.AutoExpire = c.Int("autoexpire")
+		config.AutoExpireMax = c.Int("autoexpiremax")
 		config.ScavengeTTL = c.Int("scavengettl")
 		config.MTU = c.Int("mtu")
 		config.SndWnd = c.Int("sndwnd")
@@ -318,6 +326,7 @@ func main() {
 		log.Println("keepalive:", config.KeepAlive)
 		log.Println("conn:", config.Conn)
 		log.Println("autoexpire:", config.AutoExpire)
+		log.Println("autoexpiremax:", config.AutoExpireMax)
 		log.Println("scavengettl:", config.ScavengeTTL)
 		log.Println("snmplog:", config.SnmpLog)
 		log.Println("snmpperiod:", config.SnmpPeriod)
@@ -343,9 +352,15 @@ func main() {
 		}
 
 		// Scavenge parameters check
-		if config.AutoExpire != 0 && config.ScavengeTTL > config.AutoExpire {
-			color.Red("WARNING: scavengettl is bigger than autoexpire, connections may race hard to use bandwidth.")
-			color.Red("Try limiting scavengettl to a smaller value.")
+		if config.AutoExpireMax > 0 && config.AutoExpire == 0 {
+			color.Red("WARNING: autoexpiremax is set but autoexpire is 0, auto expiration is disabled.")
+		}
+		if config.AutoExpireMax > 0 && config.AutoExpireMax < config.AutoExpire {
+			color.Red("WARNING: autoexpiremax(%d) is smaller than autoexpire(%d), autoexpiremax is ignored.", config.AutoExpireMax, config.AutoExpire)
+		}
+		if config.ScavengeTTL > 0 {
+			color.Red("WARNING: scavengettl is set to %d, sessions with unfinished streams will be force closed.", config.ScavengeTTL)
+			color.Red("Set scavengettl to 0 to guarantee established tcp connections are never cut.")
 		}
 
 		// SMUX Version check
@@ -454,16 +469,16 @@ func main() {
 			go http.ListenAndServe(":6060", nil)
 		}
 
-		// start scavenger if autoexpire is set
-		chScavenger := make(chan timedSession, 128)
-		if config.AutoExpire > 0 {
-			go scavenger(chScavenger, &config)
-		}
-
 		// start listener
 		numconn := uint16(config.Conn)
-		muxes := make([]timedSession, numconn)
+		muxes := make([]sessionSlot, numconn)
+		pool := newSessionPool(int(numconn))
 		rr := uint16(0)
+
+		// start scavenger if autoexpire is set
+		if config.AutoExpire > 0 {
+			go scavenger(pool, &config)
+		}
 
 		// create shared QPP
 		var _Q_ *qpp.QuantumPermutationPad
@@ -477,18 +492,29 @@ func main() {
 				log.Fatalf("%+v", err)
 			}
 			idx := rr % numconn
+			slot := &muxes[idx]
 
 			// do auto expiration && reconnection
-			if muxes[idx].session == nil || muxes[idx].session.IsClosed() ||
-				(config.AutoExpire > 0 && time.Now().After(muxes[idx].expiryDate)) {
-				muxes[idx].session = waitConn()
-				muxes[idx].expiryDate = time.Now().Add(time.Duration(config.AutoExpire) * time.Second)
-				if config.AutoExpire > 0 { // only when autoexpire set
-					chScavenger <- muxes[idx]
+			if slot.session == nil || slot.session.IsClosed() {
+				slot.session = waitConn()
+				slot.expiryDate = time.Now().Add(nextExpire(&config))
+				slot.deferred = false
+			} else if config.AutoExpire > 0 && time.Now().After(slot.expiryDate) {
+				// rotate to a brand new kcp connection(a new local port) and keep the
+				// old one serving its established streams until they are drained.
+				if pool.canRetire() {
+					old := slot.session
+					slot.session = waitConn()
+					slot.expiryDate = time.Now().Add(nextExpire(&config))
+					pool.retire(old)
+					slot.deferred = false
+				} else if !slot.deferred {
+					slot.deferred = true
+					log.Println("rotation deferred, retired sessions are still draining:", slot.session.LocalAddr())
 				}
 			}
 
-			go handleClient(_Q_, []byte(config.Key), muxes[idx].session, p1, config.Quiet, config.CloseWait)
+			go handleClient(_Q_, []byte(config.Key), slot.session, p1, config.Quiet, config.CloseWait)
 			rr++
 		}
 	}
@@ -525,11 +551,12 @@ func handleClient(_Q_ *qpp.QuantumPermutationPad, seed []byte, session *smux.Ses
 	// stream layer
 	err1, err2 := std.Pipe(s1, s2, closeWait)
 
-	// handles transport layer errors
-	if err1 != nil && err1 != io.EOF {
+	// handles transport layer errors, net.ErrClosed is the expected result of
+	// tearing down the other direction and is not worth reporting.
+	if err1 != nil && err1 != io.EOF && !errors.Is(err1, net.ErrClosed) {
 		logln("pipe:", err1, "in:", p1.RemoteAddr(), "out:", fmt.Sprint(p2.RemoteAddr(), "(", p2.ID(), ")"))
 	}
-	if err2 != nil && err2 != io.EOF {
+	if err2 != nil && err2 != io.EOF && !errors.Is(err2, net.ErrClosed) {
 		logln("pipe:", err2, "in:", p1.RemoteAddr(), "out:", fmt.Sprint(p2.RemoteAddr(), "(", p2.ID(), ")"))
 	}
 }
@@ -541,37 +568,100 @@ func checkError(err error) {
 	}
 }
 
-// timedSession is a wrapper for smux.Session with expiry date
-type timedSession struct {
+// sessionSlot holds the active smux.Session of a connection slot and the
+// moment when it should be rotated to a new local port.
+type sessionSlot struct {
 	session    *smux.Session
 	expiryDate time.Time
+	deferred   bool // rotation was deferred because the pool is full, logged once
 }
 
-// scavenger goroutine is used to close expired sessions
-func scavenger(ch chan timedSession, config *Config) {
+// nextExpire returns a random expiration duration in [autoexpire, autoexpiremax].
+func nextExpire(config *Config) time.Duration {
+	if config.AutoExpireMax > config.AutoExpire {
+		span := config.AutoExpireMax - config.AutoExpire
+		return time.Duration(config.AutoExpire+rand.Intn(span+1)) * time.Second
+	}
+	return time.Duration(config.AutoExpire) * time.Second
+}
+
+// retiredSession is a multiplexed session which no longer receives new streams
+// but is kept alive until all of its in-flight streams are finished.
+type retiredSession struct {
+	session   *smux.Session
+	retiredAt time.Time
+}
+
+// sessionPool keeps retired sessions alive until they are drained.
+// Its capacity is the number of kcp connections(conn), so the client never
+// holds more than 2*conn sessions and the resource usage stays bounded.
+type sessionPool struct {
+	mu       sync.Mutex
+	retired  []retiredSession
+	capacity int
+}
+
+func newSessionPool(capacity int) *sessionPool {
+	return &sessionPool{capacity: capacity}
+}
+
+// canRetire reports whether one more session can be retired.
+func (p *sessionPool) canRetire() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.retired) < p.capacity
+}
+
+// retire moves a session out of service, it will be closed once drained.
+func (p *sessionPool) retire(s *smux.Session) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.retired) >= p.capacity {
+		return false
+	}
+	p.retired = append(p.retired, retiredSession{session: s, retiredAt: time.Now()})
+	return true
+}
+
+// reap closes retired sessions once they carry no stream any more, this is what
+// keeps established tcp connections alive across a port rotation.
+func (p *sessionPool) reap(scavengeTTL int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var kept []retiredSession
+	for _, r := range p.retired {
+		// already closed by the peer or by the kernel, nothing to reclaim
+		if r.session.IsClosed() {
+			log.Println("scavenger: session normally closed:", r.session.LocalAddr())
+			continue
+		}
+		// give streams accepted just before the rotation a chance to register
+		if time.Since(r.retiredAt) < scavengePeriod*time.Second {
+			kept = append(kept, r)
+			continue
+		}
+		if r.session.NumStreams() == 0 {
+			r.session.Close()
+			log.Println("scavenger: session drained and closed:", r.session.LocalAddr())
+			continue
+		}
+		// force close is opt-in, it cuts the remaining tcp connections
+		if scavengeTTL > 0 && time.Since(r.retiredAt) > time.Duration(scavengeTTL)*time.Second {
+			r.session.Close()
+			log.Println("scavenger: session force closed with", r.session.NumStreams(), "unfinished streams:", r.session.LocalAddr())
+			continue
+		}
+		kept = append(kept, r)
+	}
+	p.retired = kept
+}
+
+// scavenger goroutine is used to close drained sessions
+func scavenger(pool *sessionPool, config *Config) {
 	ticker := time.NewTicker(scavengePeriod * time.Second)
 	defer ticker.Stop()
-	var sessionList []timedSession
-	for {
-		select {
-		case item := <-ch:
-			sessionList = append(sessionList, timedSession{
-				item.session,
-				item.expiryDate.Add(time.Duration(config.ScavengeTTL) * time.Second)})
-		case <-ticker.C:
-			var newList []timedSession
-			for k := range sessionList {
-				s := sessionList[k]
-				if s.session.IsClosed() {
-					log.Println("scavenger: session normally closed:", s.session.LocalAddr())
-				} else if time.Now().After(s.expiryDate) {
-					s.session.Close()
-					log.Println("scavenger: session closed due to ttl:", s.session.LocalAddr())
-				} else {
-					newList = append(newList, sessionList[k])
-				}
-			}
-			sessionList = newList
-		}
+	for range ticker.C {
+		pool.reap(config.ScavengeTTL)
 	}
 }
