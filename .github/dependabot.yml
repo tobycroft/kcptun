@@ -27,12 +27,14 @@ updates:
     groups:
       # KCP 核心库单独成组：升级需要重点回归，不与普通依赖混在一起。
       # 分组的匹配规则为「首个命中即归属」，因此本组必须写在通配组之前。
+      # 注：groups 下的 update-types 只接受 major / minor / patch 简写，
+      #     「version-update:semver-*」长写法仅在顶层 update-types 合法（否则配置校验失败）。
       go-kcp-core:
         patterns:
           - github.com/xtaci/*
         update-types:
-          - version-update:semver-minor
-          - version-update:semver-patch
+          - minor
+          - patch
       # 其余依赖（直接 + 间接）的 minor / patch 升级合并为一个 PR：
       # 「一个 PR 同步升级直接依赖及其全部传递依赖」，最大程度减少噪音。
       # 未写进 update-types 的 major 升级不会被合并，仍逐个开 PR，
@@ -41,8 +43,8 @@ updates:
         patterns:
           - '*'
         update-types:
-          - version-update:semver-minor
-          - version-update:semver-patch
+          - minor
+          - patch
 
   # ---------- GitHub Actions 依赖（建议开启）----------
   # 工作流本身就是发布链路的一部分，actions/* 版本过期会带来注入与兼容性风险，

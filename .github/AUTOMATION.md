@@ -150,6 +150,7 @@ VERSION=v20261030.1 bash .github/scripts/build-dist.sh
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
+| Dependabot 报 `Your .github/dependabot.yml contained invalid details`（check-run 名为 `.github/dependabot.yml`，conclusion=failure） | `groups.<name>.update-types` 写成了 `version-update:semver-minor` 这种长写法 | 分组下的 `update-types` 只接受 `major` / `minor` / `patch`；长写法仅在更新项顶层的 `update-types` 合法。本仓库已修正；此类错误可在 `https://api.github.com/repos/<owner>/<repo>/check-runs/<id>` 的 `output.summary` 里看到具体字段路径 |
 | Dependabot 一直不开 PR | 配置不在默认分支；或 PR 数已达 `open-pull-requests-limit` | 确认 `.github/dependabot.yml` 已在 `master`；`Dependabot → Security updates` 里看配额 |
 | PR 里只升级了一半依赖 | 分组规则：`github.com/xtaci/*` 单独成组，major 不分组 | 属预期；major 升级需人工确认后合并 |
 | `Automerge` 没跑 | 触发只看 `mod` / `build-test` 在 `dependabot/*` 分支完成；CI 未跑或非这两个 job | 看 PR 的 Checks 列表，确认 job 名仍是 `mod` / `build-test`（改名需同步 `REQUIRED_CHECKS`） |
