@@ -1,0 +1,325 @@
+# 依赖升级后的自动打包与发布
+#
+# 触发条件：
+#   1. push: tags 'v*'            —— 手工推 tag 时按 tag 发布
+#   2. push: master 且包含依赖类提交 —— Dependabot PR 被自动合并（或人工合并依赖升级）后自动发布
+#   3. workflow_dispatch          —— 手动发布，或 dry_run 预演（只构建不发布）
+#
+# 产物矩阵、命名、checksums.txt 格式全部复刻既有 Release，构建逻辑在
+# .github/scripts/build-dist.sh（本地也可执行同一脚本做校验）。
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 指定发布的 tag（留空 = 沿用既有 vYYYYMMDD[.N] 规则自动生成）
+        required: false
+        default: ''
+      dry_run:
+        description: 仅构建与生成说明，不推 tag、不创建 Release
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------- 构建 20 个平台二进制 + checksums.txt + Release 说明 ----------------
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'push' ||
+      github.event.ref_type == 'tag' ||
+      (github.event.ref_type == 'branch' &&
+       (github.event.head_commit.author.login == 'dependabot[bot]' ||
+        contains(github.event.head_commit.message, 'Bump') ||
+        contains(github.event.head_commit.message, 'chore(deps)')))
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      prev_tag: ${{ steps.plan.outputs.prev_tag }}
+      skip: ${{ steps.plan.outputs.skip }}
+      skip_reason: ${{ steps.plan.outputs.skip_reason }}
+      asset_count: ${{ steps.assemble.outputs.asset_count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          # 与既有 Release 的构建工具链保持一致（v20261030.1 使用 Go 1.27.3）。
+          # 升级 go 指令行时请同步这里与 ci.yml。
+          go-version: '1.27.3'
+          check-latest: false
+
+      # 规划目标 tag：优先 workflow_dispatch 输入 > tag push > 沿用既有 vYYYYMMDD[.N] 规则
+      - name: Plan tag
+        id: plan
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          skip=''
+          reason=''
+          existing_tags="$(git tag --list 'v*' | sort)"
+
+          # 纯 bash 判存在，不用 `printf | grep -q`：pipefail 下 grep 提前退出会使
+          # 上游 printf 收到 SIGPIPE，导致「已存在的 tag」被误判为不存在而重复用 tag
+          tag_exists() {
+            local want="$1" t
+            for t in ${existing_tags}; do
+              if [ "${t}" = "${want}" ]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          if [ "${{ github.event_name }}" = 'workflow_dispatch' ] && [ -n "${INPUT_TAG}" ]; then
+            tag="${INPUT_TAG}"
+          elif [ "${{ github.event.ref_type }}" = 'tag' ]; then
+            tag='${{ github.ref_name }}'
+          else
+            # 与现有 tag 风格一致：日期版本 + 同日多次发布时追加 .N
+            today="$(date -u +%Y%m%d)"
+            next=''
+            for candidate in "${today}" "${today}.1" "${today}.2" "${today}.3" "${today}.4" "${today}.5"; do
+              if ! tag_exists "v${candidate}"; then
+                next="${candidate}"
+                break
+              fi
+            done
+            if [ -z "${next}" ]; then
+              skip='true'
+              reason="同一天 v${today}.N 序号已用尽（最多到 .5），请人工指定 tag 后手动触发"
+            fi
+            tag="v${next}"
+          fi
+
+          if [ -z "${skip}" ] && tag_exists "${tag}"; then
+            # tag 已存在：Release 也已存在则跳过；Release 缺失（如上次发布中断）则补传资产
+            if gh release view "${tag}" >/dev/null 2>&1; then
+              skip='true'
+              reason="Release ${tag} 已存在，不重复发布"
+            else
+              echo "::warning::tag ${tag} 已存在但 Release 缺失，本次将补齐资产"
+            fi
+          fi
+
+          # 上一个 tag：取按字典序排序后最后一个不等于本 tag 的 tag
+          # （vYYYYMMDD[.N] 为定宽日期，字典序即时间序；tag push 时不会把自己当作 prev）
+          prev_tag=''
+          for t in ${existing_tags}; do
+            if [ "${t}" != "${tag}" ]; then
+              prev_tag="${t}"
+            fi
+          done
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "prev_tag=${prev_tag}" >> "${GITHUB_OUTPUT}"
+          echo "skip=${skip}" >> "${GITHUB_OUTPUT}"
+          echo "skip_reason=${reason}" >> "${GITHUB_OUTPUT}"
+          echo "目标 tag：${tag}（上一个 tag：${prev_tag:-无}）"
+
+      - name: Build all platforms
+        if: steps.plan.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.plan.outputs.tag }}' bash .github/scripts/build-dist.sh
+
+      - name: Collect assets
+        id: assemble
+        if: steps.plan.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          # 与既有 Release 资产清单严格一致：20 个裸二进制 + checksums.txt = 21 个
+          count="$(find dist -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          expected=21
+          if [ "${count}" -ne "${expected}" ]; then
+            echo "::error::资产数量为 ${count}，与既有 Release 的 ${expected} 不一致"
+            exit 1
+          fi
+          echo "asset_count=${count}" >> "${GITHUB_OUTPUT}"
+          echo "== checksums.txt =="
+          head -3 dist/checksums.txt
+          echo "== 资产 =="
+          ls -1 dist
+
+      - name: Gather context for release notes
+        id: ctx
+        if: steps.plan.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.plan.outputs.tag }}'
+          prev_tag='${{ steps.plan.outputs.prev_tag }}'
+          head_sha='${{ github.sha }}'
+          base='${{ github.event.before }}'
+
+          case '${{ github.event_name }}' in
+            workflow_dispatch) base="$(git rev-parse HEAD~1 2>/dev/null || echo "${head_sha}")" ;;
+            push)
+              if [ '${{ github.event.ref_type }}' = 'tag' ]; then
+                # tag 推送时只发布该 commit，详情从 Release 说明里的 compare 链接追溯
+                base="${head_sha}"
+              fi
+              ;;
+          esac
+          # before 为全零（新建分支首次推送）或为空时回退
+          case "${base}" in
+            0000000000000000000000000000000000000000 | '') base="${head_sha}" ;;
+          esac
+
+          if [ -n "${prev_tag}" ]; then
+            git show "${prev_tag}:go.mod" >/tmp/prev-go.mod
+          else
+            : >/tmp/prev-go.mod
+          fi
+
+          if [ "${base}" = "${head_sha}" ]; then
+            printf '[{"sha":"%s"}]\n' "${head_sha}" >/tmp/commits.json
+            echo '[]' >/tmp/prs.json
+          else
+            gh api "repos/${{ github.repository }}/compare/${base}...${head_sha}" \
+              --jq '{commits: .commits, prs: [.commits[] | select(.commit.message | test("(?i)pull request #[0-9]+"))]}' \
+              >/tmp/compare.json
+            jq '.commits' /tmp/compare.json >/tmp/commits.json
+            jq '[.prs[] | {sha: .sha}] | unique_by(.sha)' /tmp/compare.json >/tmp/merge-shas.json
+
+            numbers=''
+            if [ -s /tmp/merge-shas.json ]; then
+              numbers="$(jq -r '.[].sha' /tmp/merge-shas.json | while read -r sha; do
+                gh api "repos/${{ github.repository }}/commits/${sha}/pulls" \
+                  --jq '.[].number' 2>/dev/null || true
+              done | sort -un)"
+            fi
+
+            out='['
+            for n in ${numbers}; do
+              pr="$(gh api "repos/${{ github.repository }}/pulls/${n}" 2>/dev/null || echo '')"
+              if [ -n "${pr}" ]; then
+                if [ "${out}" = '[' ]; then out="[${pr}"; else out="${out},${pr}"; fi
+              fi
+            done
+            echo "${out}]" >/tmp/prs.json
+          fi
+
+          echo "commit_count=$(jq 'length' /tmp/commits.json)" >> "${GITHUB_OUTPUT}"
+          echo "pr_count=$(jq 'length' /tmp/prs.json)" >> "${GITHUB_OUTPUT}"
+          echo "本次范围：提交 $(jq 'length' /tmp/commits.json) 个，关联 PR $(jq 'length' /tmp/prs.json) 个"
+
+      - name: Generate release notes
+        if: steps.plan.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/gen-notes.py \
+            --new-tag '${{ steps.plan.outputs.tag }}' \
+            --prev-tag '${{ steps.plan.outputs.prev_tag }}' \
+            --prev-go-mod /tmp/prev-go.mod \
+            --cur-go-mod go.mod \
+            --commits /tmp/commits.json \
+            --prs /tmp/prs.json \
+            --go-version "$(go version | awk '{print $3}')" \
+            --head-sha '${{ github.sha }}' \
+            --repo '${{ github.repository }}' \
+            --asset-count '${{ steps.assemble.outputs.asset_count }}' \
+            --output release-notes.md
+          echo '===== Release 说明 ====='
+          cat release-notes.md
+
+      - name: Upload work artifacts
+        if: steps.plan.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-${{ steps.plan.outputs.tag }}
+          path: |
+            dist
+            release-notes.md
+          retention-days: 7
+
+      - name: Summary
+        run: |
+          set -euo pipefail
+          {
+            echo "### Release 预演结果"
+            echo ""
+            echo "- 目标 tag：\`${{ steps.plan.outputs.tag }}\`"
+            echo "- 上一个 tag：\`${{ steps.plan.outputs.prev_tag || '无' }}\`"
+            echo "- 资产数量：${{ steps.assemble.outputs.asset_count || 0 }}"
+            echo "- 是否跳过：${{ steps.plan.outputs.skip || 'false' }} ${{ steps.plan.outputs.skip_reason }}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  # ---------------- 发布：推 tag + 创建 Release + 上传资产 ----------------
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    needs: build
+    if: >-
+      needs.build.outputs.skip != 'true' &&
+      github.event.inputs.dry_run != 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Download work artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: staging-${{ needs.build.outputs.tag }}
+
+      - name: Push tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag='${{ needs.build.outputs.tag }}'
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null ||
+             gh api "repos/${{ github.repository }}/git/ref/tags/${tag}" >/dev/null 2>&1; then
+            echo "tag ${tag} 已存在，跳过推送"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "${tag}" '${{ github.sha }}' -m "kcptun ${tag}"
+          git push origin "refs/tags/${tag}"
+
+      - name: Create release & upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag='${{ needs.build.outputs.tag }}'
+          # Release 标题沿用最新风格：kcptun vYYYYMMDD[.N]
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "Release ${tag} 已存在，补传缺失资产"
+            gh release upload "${tag}" dist/* --clobber
+            exit 0
+          fi
+          gh release create "${tag}" \
+            --title "kcptun ${tag}" \
+            --notes-file release-notes.md \
+            dist/*
+          echo "== 已发布资产 =="
+          gh release view "${tag}" --json assets --jq '.assets[].name'
+
+      - name: Dry-run notice
+        if: github.event.inputs.dry_run == 'true'
+        run: echo "dry_run=true，未推 tag、未创建 Release"

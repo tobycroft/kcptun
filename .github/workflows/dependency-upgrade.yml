@@ -1,0 +1,105 @@
+# 手动触发的「依赖升级到最新」流程
+#
+# 与 Dependabot 互补：Dependabot 负责日常增量升级，本工作流负责一次性把
+# 直接依赖 + 间接依赖全部拉到最新（go get -u ./... + go mod tidy），
+# 并强制校验 go.mod / go.sum 同步、gofmt / vet / build / test 全通过后才开 PR。
+# mode=direct 时只动 go.mod 中的直接依赖。
+#
+# 失败与降级：
+#   - 任何校验步骤失败 → 工作流失败，不推主干、不合并；若改动已推分支，
+#     job 仍会以 if: always() 开一个 draft PR（标题带 [校验失败]、标签 automerge-skip），
+#     把 diff 保留下来供人工排查；
+#   - go 指令行（go/toolchain）默认不动，可通过输入 go_directive 显式升级。
+name: Dependency Upgrade
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 升级范围
+        type: choice
+        default: all
+        options:
+          - all
+          - direct
+      go_directive:
+        description: Go 版本声明（go 指令行）处理方式
+        type: choice
+        default: 'no'
+        options:
+          - 'no'
+          - tidy-default
+          - 'toolchain 1.27.3'
+      target_branch:
+        description: 升级分支名（留空则自动生成 chore/go-deps-latest-<run_id>）
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: dependency-upgrade
+  cancel-in-progress: false
+
+jobs:
+  upgrade:
+    name: upgrade
+    runs-on: ubuntu-latest
+    env:
+      API: https://api.github.com/repos/${{ github.repository }}
+      MAIN_BRANCH: master
+      # 作业级 env 才能引用 ${{ env.* }} / 输入项，运行中由 GITHUB_ENV 覆盖不生效
+      UPGRADE_BRANCH: ${{ github.event.inputs.target_branch || format('chore/go-deps-latest-{0}', github.run_id) }}
+      MODE: ${{ github.event.inputs.mode }}
+      GO_DIRECTIVE: ${{ github.event.inputs.go_directive }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          # 需要连同 go 指令行一起升级时，先保证 runner 上有所需工具链
+          go-version: '1.27.3'
+          check-latest: false
+
+      - name: Upgrade dependencies & validate
+        id: upgrade
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/upgrade-deps.sh
+
+      # 即使校验失败也执行：把已推送的分支变成可评审的 PR（失败时为 draft）
+      - name: Open pull request
+        if: always() && steps.upgrade.outputs.branch_pushed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VALIDATION_OK: ${{ steps.upgrade.outputs.validation_ok }}
+          COMPARE_BASE: ${{ steps.upgrade.outputs.compare_base }}
+          COMMIT_HEAD: ${{ steps.upgrade.outputs.commit_head }}
+          GO_DIRECTIVE_CHANGED: ${{ steps.upgrade.outputs.go_directive_changed }}
+          FAILED_STEP: ${{ steps.upgrade.outputs.failed_step }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/open-upgrade-pr.py
+          cat /tmp/pr-result.json
+
+      - name: No changes summary
+        if: steps.upgrade.outputs.branch_pushed != 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo '### 依赖升级结果'
+            echo ''
+            echo '- 没有产生任何 go.mod / go.sum 变化（或升级在校验阶段中断），未创建 PR'
+            echo "- 升级范围：${MODE}；go 指令行处理方式：${GO_DIRECTIVE}"
+            echo '- 若上面日志里有报错，请按日志修复后重跑本工作流'
+          } >> "${GITHUB_STEP_SUMMARY}"

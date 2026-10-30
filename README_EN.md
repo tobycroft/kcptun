@@ -238,6 +238,24 @@ go build -o server/server ./server
 
 Requires Go 1.27+.
 
+Verify the multi-platform artifacts locally (identical matrix and naming to the published
+Release assets):
+
+```sh
+VERSION=v20261030.1 bash .github/scripts/build-dist.sh
+```
+
+## Automation Pipeline
+
+Third-party dependency updates (Dependabot) → CI (`gofmt` / `go vet` / build / tests) →
+auto-merge (squash) → multi-platform build + SHA-256 checksums → automatic tag and GitHub
+Release are fully handled by GitHub Actions. Once a dependency update lands on `master`,
+the new binaries are published with no manual step, using the same file names as the table
+above.
+
+See [`.github/AUTOMATION.md`](.github/AUTOMATION.md) for the full flow, required repository
+settings, first-run verification steps and troubleshooting.
+
 ## Acknowledgements
 
 This project is derived from [xtaci/kcptun](https://github.com/xtaci/kcptun). Thanks to the original author **xtaci** for the excellent work, and to the underlying libraries [kcp-go](https://github.com/xtaci/kcp-go), [smux](https://github.com/xtaci/smux), [qpp](https://github.com/xtaci/qpp) and [tcpraw](https://github.com/xtaci/tcpraw).

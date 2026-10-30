@@ -360,6 +360,21 @@ go build -o server/server ./server
 
 需要 Go 1.27+。
 
+本地一键核对多平台产物（与 Releases 中资产完全相同的矩阵与命名）：
+
+```sh
+VERSION=v20261030.1 bash .github/scripts/build-dist.sh
+```
+
+## 自动化流水线
+
+第三方依赖更新（Dependabot）→ CI（编译 / go vet / gofmt / 测试）→ 自动合并（squash）→
+多平台打包 + SHA-256 校验和 → 自动打 tag 并发布 GitHub Release，已全部由 GitHub Actions 接手。
+依赖合入 `master` 后无需任何手工操作即可拿到新版本产物；产物命名与上文下载表格保持一致。
+
+流程细节、需要开启的仓库设置、首次验证步骤与常见问题排查见
+[`.github/AUTOMATION.md`](.github/AUTOMATION.md)。
+
 ## 致谢
 
 本项目基于 [xtaci/kcptun](https://github.com/xtaci/kcptun) 二次开发，感谢原作者 **xtaci** 的出色工作，以及 [kcp-go](https://github.com/xtaci/kcp-go)、[smux](https://github.com/xtaci/smux)、[qpp](https://github.com/xtaci/qpp)、[tcpraw](https://github.com/xtaci/tcpraw) 等基础库。

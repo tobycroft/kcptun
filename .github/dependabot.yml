@@ -1,0 +1,68 @@
+# Dependabot 配置：Go 依赖 + Actions 依赖自动更新
+#
+# 目标分支为仓库默认分支 master（已用 GitHub API 核实：default_branch = master）。
+# 若将来把默认分支改为 main，请同步修改这里的 target-branch，
+# 以及 .github/workflows/ 下各工作流中的分支过滤器。
+version: 2
+updates:
+  # ---------- Go 模块依赖 ----------
+  - package-ecosystem: gomod
+    directory: /
+    target-branch: master
+    schedule:
+      interval: daily
+      time: '08:00'
+      timezone: Asia/Shanghai
+    # 同时覆盖直接依赖与间接依赖；间接依赖只在被分组收拢时才单独开 PR
+    open-pull-requests-limit: 15
+    pull-request-branch-name:
+      separator: '-'
+    commit-message:
+      prefix: chore
+      prefix-development: chore
+      include: scope
+    labels:
+      - dependencies
+      - go
+    groups:
+      # KCP 核心库单独成组：升级需要重点回归，不与普通依赖混在一起。
+      # 分组的匹配规则为「首个命中即归属」，因此本组必须写在通配组之前。
+      go-kcp-core:
+        patterns:
+          - github.com/xtaci/*
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-patch
+      # 其余依赖（直接 + 间接）的 minor / patch 升级合并为一个 PR：
+      # 「一个 PR 同步升级直接依赖及其全部传递依赖」，最大程度减少噪音。
+      # 未写进 update-types 的 major 升级不会被合并，仍逐个开 PR，
+      # 由人工确认后再合（自动合并工作流也只处理带 dependencies 标签的分组 PR）。
+      go-all-minor-patch:
+        patterns:
+          - '*'
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-patch
+
+  # ---------- GitHub Actions 依赖（建议开启）----------
+  # 工作流本身就是发布链路的一部分，actions/* 版本过期会带来注入与兼容性风险，
+  # 因此这里一并纳入自动更新。
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: master
+    schedule:
+      interval: weekly
+      day: monday
+      time: '08:00'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      actions-all:
+        patterns:
+          - actions/*

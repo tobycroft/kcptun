@@ -1,0 +1,240 @@
+# Dependabot PR 自动合并
+#
+# 触发方式：CI 的 check_run 全部结束后运行。
+#   - 只看 CI 工作流（mod / build-test）的结论：这两项通过即放行；
+#     其它工作流（含本工作流自身）的 check_run 不参与判定，避免自锁。
+#   - 合并使用 squash；合并后重新打回 dependencies / go 标签（squash 会丢标签）。
+#   - 降级策略：CI 失败 / 存在冲突 / 结论不明 → 保留 PR + 打 automerge-skip 标签 + 写评论，
+#     绝不静默关闭，也绝不合并。
+#
+# 所需仓库设置见 .github/AUTOMATION.md（Allow auto-merge、分支保护必需状态检查、secret）。
+name: Automerge Dependabot
+
+on:
+  check_run:
+    types:
+      - completed
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  # 同一个 PR 串行处理，避免并发重复合并 / 重复打标签
+  group: automerge-${{ github.event.check_run.pull_requests[0].number || github.event.check_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  automerge:
+    name: automerge
+    # 仅处理 CI 两个必需检查在 Dependabot 分支上完成的事件；
+    # 不匹配本工作流自身的 check_run，避免形成触发循环。
+    if: >-
+      github.event_name == 'check_run' &&
+      github.event.action == 'completed' &&
+      github.event.check_run.head_branch != null &&
+      startsWith(github.event.check_run.head_branch, 'dependabot/') &&
+      (github.event.check_run.name == 'mod' || github.event.check_run.name == 'build-test')
+    runs-on: ubuntu-latest
+    env:
+      API: https://api.github.com/repos/${{ github.repository }}
+      # 与 ci.yml 中的 job 名严格对应；这两个检查必须全绿才允许自动合并
+      REQUIRED_CHECKS: mod build-test
+      SKIP_LABEL: automerge-skip
+    steps:
+      - name: Resolve pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pr_number='${{ github.event.check_run.pull_requests[0].number }}'
+          sha='${{ github.event.check_run.head_sha }}'
+
+          # 多行/特殊字符值统一用 GITHUB_ENV 的分隔写法，避免二次解析
+          put() {
+            {
+              echo "$1<<__EOF__"
+              echo "$2"
+              echo __EOF__
+            } >> "${GITHUB_ENV}"
+          }
+
+          # check_run 只带 head_sha 时（如 push 触发的 CI），按分支名反查唯一 open PR
+          if [ -z "${pr_number}" ] || [ "${pr_number}" = "0" ]; then
+            pr_number="$(gh api "repos/${{ github.repository }}/pulls?state=open" | \
+              jq -r --arg sha "${sha}" '[.[] | select((.head.ref | startswith("dependabot/")) and .head.sha == $sha)] | .[0].number // empty')"
+          fi
+
+          if [ -z "${pr_number}" ]; then
+            echo "未找到与 commit ${sha} 关联的 Dependabot PR，跳过"
+            exit 0
+          fi
+
+          # mergeable 由 GitHub 异步计算，未就绪时短暂重试，避免误判为「不可合并」
+          pr_json='{}'
+          for attempt in 1 2 3 4 5 6; do
+            pr_json="$(gh api "repos/${{ github.repository }}/pulls/${pr_number}")"
+            if [ "$(jq -r '.mergeable' <<<"${pr_json}")" != "null" ]; then
+              break
+            fi
+            echo "mergeable 尚未计算完成，等待 5s（第 ${attempt} 次）"
+            sleep 5
+          done
+
+          put pr_number "${pr_number}"
+          put pr_state "$(jq -r '.state' <<<"${pr_json}")"
+          put pr_title "$(jq -r '.title' <<<"${pr_json}")"
+          put author "$(jq -r '.user.login' <<<"${pr_json}")"
+          put labels "$(jq -r '[.labels[].name] | join(" ")' <<<"${pr_json}")"
+          put mergeable "$(jq -r '.mergeable' <<<"${pr_json}")"
+          put mergeable_state "$(jq -r '.mergeable_state' <<<"${pr_json}")"
+          put pr_base "$(jq -r '.base.ref' <<<"${pr_json}")"
+          put pr_url "$(jq -r '.html_url' <<<"${pr_json}")"
+          put head_sha "$(jq -r '.head.sha' <<<"${pr_json}")"
+          put resolved "true"
+
+      - name: Evaluate gates (CI result / conflicts / labels)
+        if: env.resolved == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          fail() {
+            echo "decision=skip" >> "${GITHUB_ENV}"
+            {
+              echo 'reason<<__EOF__'
+              echo "$1"
+              echo __EOF__
+            } >> "${GITHUB_ENV}"
+            echo "::notice::不自动合并：$1"
+            exit 0
+          }
+
+          # 0) PR 已关闭/已合并：静默退出，不做任何评论与标签
+          if [ "${pr_state}" != "open" ]; then
+            echo "PR #${pr_number} 当前状态为 ${pr_state}，无需处理"
+            exit 0
+          fi
+
+          # 1) 只处理 Dependabot 提交的 PR
+          if [ "${author}" != "dependabot[bot]" ]; then
+            fail "PR #${pr_number} 的提交者不是 dependabot[bot]（实际为 ${author}）"
+          fi
+
+          # 2) 只处理主干分支上的依赖 PR
+          if [ "${pr_base}" != "master" ]; then
+            fail "PR #${pr_number} 的目标分支是 ${pr_base}，不是主干 master"
+          fi
+
+          # 3) 人工喊停：带上跳过标签就不再自动处理
+          case " ${labels} " in
+            *" ${SKIP_LABEL} "*|*" do-not-merge "*|*" hold "*)
+              fail "PR 已带有表示人工暂缓的标签（${labels}）"
+              ;;
+          esac
+
+          # 4) 冲突 / mergeable 状态未知
+          if [ "${mergeable}" != "true" ]; then
+            fail "PR 当前不可合并（mergeable=${mergeable}, state=${mergeable_state}），可能存在冲突或检查未完成"
+          fi
+
+          # 5) 必需状态检查：CI 的 mod / build-test 必须全部 success
+          checks_json="$(gh api "repos/${{ github.repository }}/commits/${head_sha}/check-runs?per_page=100" \
+            --jq '.check_runs')"
+          missing=''
+          for name in ${REQUIRED_CHECKS}; do
+            conclusion="$(jq -r --arg n "${name}" \
+              '[.[] | select(.name == $n)] | if length == 0 then "MISSING" else (sort_by(.id) | last | .conclusion // "null") end' \
+              <<<"${checks_json}")"
+            case "${conclusion}" in
+              success) : ;;
+              missing|MISSING) missing="${missing} ${name}(缺失)" ;;
+              *) fail "必需检查 ${name} 未通过（结论：${conclusion}）" ;;
+            esac
+          done
+          if [ -n "${missing}" ]; then
+            fail "缺少必需检查:${missing}"
+          fi
+
+          echo "decision=merge" >> "${GITHUB_ENV}"
+          echo "reason=" >> "${GITHUB_ENV}"
+
+      - name: Ensure labels exist
+        if: env.resolved == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          create_label() {
+            local name="$1" color="$2" desc="$3" code
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'Accept: application/vnd.github+json' \
+              "${API}/labels" \
+              -d "{\"name\":\"${name}\",\"color\":\"${color}\",\"description\":\"${desc}\"}")"
+            echo "label ${name}: HTTP ${code}"
+          }
+          create_label "${SKIP_LABEL}" 'B60200' 'Dependabot PR 未满足自动合并条件，需人工处理'
+          create_label 'dependencies' '0366d6' '第三方依赖更新'
+          create_label 'go' '00ADD8' 'Go 模块依赖更新'
+
+      - name: Approve pull request
+        if: env.decision == 'merge'
+        env:
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 优先用独立账号 / PAT 完成 approve（分支保护要求 approval 时必须有；
+          # GITHUB_TOKEN 无法 approve 自己触发的 PR，属已知平台限制）。
+          # 未配置 AUTOMERGE_TOKEN 时退回 GITHUB_TOKEN：分支保护未强制 approval 也能正常合并。
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "未配置 secrets.AUTOMERGE_TOKEN，跳过显式 approve（如分支保护要求 approval，请配置该 secret）"
+            exit 0
+          fi
+          gh pr review "${pr_number}" --repo "${{ github.repository }}" --approve \
+            --body '自动检查通过（CI: mod / build-test 全绿，无冲突），自动批准合并。'
+
+      - name: Merge with squash
+        if: env.decision == 'merge'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh pr merge "${pr_number}" --repo "${{ github.repository }}" \
+            --squash --delete-branch \
+            --subject "chore(deps): ${pr_title} (#${pr_number})"
+          echo "merged=true" >> "${GITHUB_ENV}"
+
+      - name: Restore labels after squash merge
+        if: env.merged == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # squash 合并会丢弃 PR 标签，这里补回，供 Release 判定依赖升级来源
+          merge_sha="$(gh api "repos/${{ github.repository }}/pulls/${pr_number}" --jq '.merge_commit_sha')"
+          curl -sS -X PUT \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            "${API}/commits/${merge_sha}/labels" \
+            -d '{"labels":["dependencies","go"]}' >/dev/null
+          echo "已为合并提交 ${merge_sha} 补打 dependencies / go 标签"
+
+      - name: Report skip (keep PR open)
+        if: env.decision == 'skip'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "保留 PR #${pr_number} 不做自动合并：${reason}"
+          gh pr edit "${pr_number}" --repo "${{ github.repository }}" --add-label "${SKIP_LABEL}" || true
+          body="### 自动合并已跳过
+
+          本 PR 保持打开，等待人工处理。原因：
+
+          > ${reason}
+
+          排查建议见 [.github/AUTOMATION.md](https://github.com/${{ github.repository }}/blob/master/.github/AUTOMATION.md)。
+          处理完成后移除 \`automerge-skip\` 标签并重新推送（或手动合并）即可再次触发自动合并。"
+          gh pr comment "${pr_number}" --repo "${{ github.repository }}" --body-file - <<<"${body}"

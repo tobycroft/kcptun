@@ -28,3 +28,8 @@ build/*
 dist/
 .DS_Store
 *Zone.Identifier
+
+# 依赖升级工作流（.github/workflows/dependency-upgrade.yml）生成的临时快照文件
+before.txt
+after.txt
+dep-changes.md
