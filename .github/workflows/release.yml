@@ -240,7 +240,7 @@ jobs:
             echo '[]' >/tmp/prs.json
           else
             gh api "repos/${{ github.repository }}/compare/${base}...${head_sha}" \
-              --jq '{commits: .commits, prs: [.commits[] | select(.commit.message | test("(?i)pull request #[0-9]+"))]}' \
+              --jq '{commits: .commits, prs: [.commits[] | select(.commit.message | test("(?i)(pull request #[0-9]+|\\(#[0-9]+\\))"))]}' \
               >/tmp/compare.json
             jq '.commits' /tmp/compare.json >/tmp/commits.json
             jq '[.prs[] | {sha: .sha}] | unique_by(.sha)' /tmp/compare.json >/tmp/merge-shas.json

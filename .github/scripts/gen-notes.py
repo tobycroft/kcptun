@@ -158,7 +158,10 @@ def main():
 	dependabot_commits = [c for c in commits if (c.get("author") or {}).get("login") == "dependabot[bot]"]
 	prs = load_json(args.prs, [])
 	dependabot_prs = [p for p in prs if (p.get("user") or {}).get("login") == "dependabot[bot]"]
-	bump_prs = [p for p in dependabot_prs if str(p.get("title", "")).startswith("Bump ")]
+	# 不能只比 startswith("Bump ")：本仓库 dependabot.yml 设了 commit-message.prefix: chore，
+	# PR 标题形如 "chore(deps): bump the actions-all group with 4 updates"，
+	# 因此改为大小写无关地识别 bump 关键词（仍限定作者为 dependabot[bot]）。
+	bump_prs = [p for p in dependabot_prs if "bump" in str(p.get("title", "")).lower()]
 
 	compare = ""
 	range_text = f"本次推送的提交（基线 commit `{args.head_sha[:8]}`）"
@@ -236,7 +239,7 @@ def main():
 		lines.append("")
 		lines.append(
 			f"- 全部平台二进制使用 {args.go_version} 重新构建"
-			"（`-trimpath`、`CGO_ENABLED=0`、`-ldflags \"-X main.VERSION={0}\"`）".format(args.new_tag)
+			"（`-trimpath`、`CGO_ENABLED=0`、`-ldflags \"-s -w -X main.VERSION={0}\"`）".format(args.new_tag)
 		)
 		lines.append("")
 
