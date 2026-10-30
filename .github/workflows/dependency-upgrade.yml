@@ -56,14 +56,14 @@ jobs:
       GO_DIRECTIVE: ${{ github.event.inputs.go_directive }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: master
           fetch-depth: 1
           persist-credentials: true
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # 需要连同 go 指令行一起升级时，先保证 runner 上有所需工具链
           go-version: '1.27.3'

@@ -53,13 +53,13 @@ jobs:
       asset_count: ${{ steps.assemble.outputs.asset_count }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           # 与既有 Release 的构建工具链保持一致（v20261030.1 使用 Go 1.27.3）。
           # 升级 go 指令行时请同步这里与 ci.yml。
@@ -245,7 +245,7 @@ jobs:
 
       - name: Upload work artifacts
         if: steps.plan.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: staging-${{ steps.plan.outputs.tag }}
           path: |
@@ -275,13 +275,13 @@ jobs:
       github.event.inputs.dry_run != 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: true
 
       - name: Download work artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: staging-${{ needs.build.outputs.tag }}
 
