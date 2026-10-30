@@ -26,6 +26,16 @@ updates:
     labels:
       - dependencies
       - go
+    ignore:
+      # smux 的 v2.0.0 / v2.0.1 是「幽灵版本」：仓库里已没有对应 tag
+      # （api.github.com/repos/xtaci/smux/git/ref/tags/v2.0.1 返回 404，全仓 98 个 tag 中无 v2.x），
+      # 但 Go 模块代理仍缓存着，Dependabot 会反复推荐。
+      # 而且 smux go.mod 声明的是 module github.com/xtaci/smux（无 /v2），v2.x 只能以
+      # +incompatible 引入，且删掉了 Config.Version 字段（本仓库 3 处在用），必然编译失败。
+      # 真实最新 tag 为 v1.5.58，保持在此版本线内升级。
+      - dependency-name: github.com/xtaci/smux
+        versions:
+          - '>= 2.0.0'
     groups:
       # KCP 核心库单独成组：升级需要重点回归，不与普通依赖混在一起。
       # 分组的匹配规则为「首个命中即归属」，因此本组必须写在通配组之前。

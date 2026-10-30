@@ -32,7 +32,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `.github/dependabot.yml` | 依赖更新入口：`gomod`（每日、分组、标签、提交信息前缀）与 `github-actions`（每周一） |
+| `.github/dependabot.yml` | 依赖更新入口：`gomod`（每日、分组、标签、提交信息前缀）与 `github-actions`（每周一）；并用 `ignore` 屏蔽幽灵版本（见 §4.2） |
 | `.github/workflows/ci.yml` | 编译 + 静态检查 + 测试；job 名 `mod` / `build-test` 就是分支保护里的必需状态检查，也是自动合并的放行条件 |
 | `.github/workflows/automerge-dependabot.yml` | `pull_request` 触发（只处理 `dependabot[bot]` 开的 PR），作业内轮询等待 `mod` / `build-test` 出结论；全绿且无冲突则自动 approve + **squash** 合并，否则保留 PR 并打标签写原因；支持 `workflow_dispatch` 按 PR 编号补跑 |
 | `.github/workflows/dependency-upgrade.yml` | 手动（`workflow_dispatch`）一次性升级到最新：`go get -u ./...` + `go mod tidy` + 校验 + 开 PR |
@@ -118,11 +118,27 @@ VERSION=v20261030.1 bash .github/scripts/build-dist.sh
 （唯一 512 字节差异来自 Windows PE 段对齐），哈希不同仅因二进制内嵌的 git VCS 元数据
 （提交号随新提交变化），属于预期的可追溯信息，不是构建方式差异。
 
-关于 `kcptun-linux-*.tar.gz`：仅 `v20261029.1` 提供过，`v20261030` / `v20261030.1` 已不再提供，
+### 4.1 关于 `kcptun-linux-*.tar.gz`
+
+仅 `v20261029.1` 提供过，`v20261030` / `v20261030.1` 已不再提供，
 而 `kcptun.sh` 实际只下载 `server_<arch>` 与 `checksums.txt`（不依赖 tar 包，还会主动清理遗留的
 `kcptun-*.tar.gz`）。因此流水线默认不产出 tar 包，以复刻**最新**资产矩阵；
 中文 README「Linux x86 / x86_64 另外提供 `kcptun-linux-*.tar.gz`」这一句与最新 Release 不一致，
 建议后续要么补上该资产（需先确认包内文件结构），要么删掉该说明。
+
+### 4.2 已屏蔽的幽灵版本：`github.com/xtaci/smux` v2.x
+
+实测背景（PR #4）：Dependabot 反复提出 `smux 1.5.58 → 2.0.1+incompatible`，但：
+
+- `api.github.com/repos/xtaci/smux/git/ref/tags/v2.0.1` 返回 **404**，全仓 98 个 tag 里没有任何 v2.x，
+  真实最新 tag 是 `v1.5.58`；这些 v2 版本只存在 Go 模块代理的缓存里；
+- smux 的 `go.mod` 写的是 `module github.com/xtaci/smux`（无 `/v2`），所以 v2.x 只能以
+  `+incompatible` 形式引入；
+- v2 删掉了 `Config.Version`，本仓库 3 处在用（`client/main.go:441`、`server/main.go:454`、
+  `client/losstest.go:219`），CI 必报 `smuxConfig.Version undefined`。
+
+处理方式：在 `dependabot.yml` 的 gomod 条目里 `ignore` 掉 `github.com/xtaci/smux` 的 `>= 2.0.0`，
+并关闭该 PR。今后若上游真的发布带 `/v2` 模块路径的版本，再删除这条 ignore。
 
 ---
 
