@@ -2,6 +2,8 @@
 
 # kcptun
 
+![Special Version](assets/Specialversion.png)
+
 基于 KCP 协议的 TCP 加速隧道：客户端把本地 TCP 连接复用到 KCP（UDP）上发往服务端，服务端再还原成 TCP 转发到目标服务。适合跨境线路、弱网、移动网络等高丢包高延迟场景。
 
 - **抗丢包**：KCP ARQ + 快速重传 + Reed-Solomon 前向纠错
