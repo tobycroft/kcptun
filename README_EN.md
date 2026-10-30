@@ -14,7 +14,7 @@ A TCP-over-KCP tunnel: the client multiplexes local TCP connections onto KCP (UD
 The server can be installed with the [kcptun-script](https://github.com/TuuzNet/kcptun-script) installer, which handles downloads, configuration, process supervision, and firewall rules:
 
 ```sh
-wget --no-check-certificate -O kcptun.sh https://github.com/tobycroft/shell-scripts/raw/master/kcptun/kcptun.sh
+wget --no-check-certificate -O kcptun.sh https://github.com/TuuzNet/kcptun-script/raw/main/kcptun.sh
 sh kcptun.sh
 ```
 
@@ -237,6 +237,10 @@ go build -o server/server ./server
 ```
 
 Requires Go 1.27+.
+
+## Acknowledgements
+
+This project is derived from [xtaci/kcptun](https://github.com/xtaci/kcptun). Thanks to the original author **xtaci** for the excellent work, and to the underlying libraries [kcp-go](https://github.com/xtaci/kcp-go), [smux](https://github.com/xtaci/smux), [qpp](https://github.com/xtaci/qpp) and [tcpraw](https://github.com/xtaci/tcpraw).
 
 ## License
 

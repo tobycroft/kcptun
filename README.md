@@ -18,7 +18,7 @@
 服务端推荐用 [kcptun-script](https://github.com/TuuzNet/kcptun-script) 一键脚本安装，自动完成下载、配置、守护和防火墙设置：
 
 ```sh
-wget --no-check-certificate -O kcptun.sh https://github.com/tobycroft/shell-scripts/raw/master/kcptun/kcptun.sh
+wget --no-check-certificate -O kcptun.sh https://github.com/TuuzNet/kcptun-script/raw/main/kcptun.sh
 sh kcptun.sh
 ```
 
@@ -359,6 +359,10 @@ go build -o server/server ./server
 ```
 
 需要 Go 1.27+。
+
+## 致谢
+
+本项目基于 [xtaci/kcptun](https://github.com/xtaci/kcptun) 二次开发，感谢原作者 **xtaci** 的出色工作，以及 [kcp-go](https://github.com/xtaci/kcp-go)、[smux](https://github.com/xtaci/smux)、[qpp](https://github.com/xtaci/qpp)、[tcpraw](https://github.com/xtaci/tcpraw) 等基础库。
 
 ## License
 
