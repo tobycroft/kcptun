@@ -19,7 +19,8 @@
 | 仓库状态 | 非 fork、公开、无 open PR/issue（因此新工作流不会与存量运行纠缠） |
 | 已注册工作流 | 推送后 4 个工作流均为 `active`（API `actions/workflows`） |
 | 首轮回环实测 | CI(push master) 全绿；`Release` 与 `Automerge` 正确判定为 skipped；Dependabot 立即跑出 `go_modules` 与 `github_actions` 两个更新作业并开出 PR #4/#5 |
-| 自动合并路径实测 | PR #5（actions 分组）的 `mod` / `build-test` 全绿，automerge 作业依次走完 resolve → 等 CI → 闸门通过 → approve → **卡在 merge 步骤（缺 contents: write）**；已修正，合并失败也会走降级分支保留 PR |
+| 自动合并路径实测 | PR #5（actions 分组）的 `mod` / `build-test` 全绿，automerge 首跑卡在 merge 步骤（缺 `contents: write`）；修正后重跑 **已真实合并成功**（`merged_by=github-actions[bot]`，合并提交 `c0366e8e`） |
+| **GITHUB_TOKEN 链式抑制** | 实测：`c0366e8e` 上 **0 个 check run** —— 由 `GITHUB_TOKEN` 合并产生的 master push 不会再触发任何工作流。因此“合并→发布”这一跳改用 `workflow_run`（监听 Automerge Dependabot 完成）；人工用 PAT / 本地合并仍走 push 路径 |
 | check_run 不可靠 | **Dependabot PR 上的 `check_run` 事件不会为本仓库工作流创建运行**（只有 master 自身推送的检查会触发），因此自动合并改用 `pull_request` 触发 + 作业内轮询 CI |
 
 > 一键脚本仓库 `TuuzNet/kcptun-script` 已有自己的 `release.yml`（发布 `kcptun.sh` 本身），
@@ -35,7 +36,7 @@
 | `.github/workflows/ci.yml` | 编译 + 静态检查 + 测试；job 名 `mod` / `build-test` 就是分支保护里的必需状态检查，也是自动合并的放行条件 |
 | `.github/workflows/automerge-dependabot.yml` | `pull_request` 触发（只处理 `dependabot[bot]` 开的 PR），作业内轮询等待 `mod` / `build-test` 出结论；全绿且无冲突则自动 approve + **squash** 合并，否则保留 PR 并打标签写原因；支持 `workflow_dispatch` 按 PR 编号补跑 |
 | `.github/workflows/dependency-upgrade.yml` | 手动（`workflow_dispatch`）一次性升级到最新：`go get -u ./...` + `go mod tidy` + 校验 + 开 PR |
-| `.github/workflows/release.yml` | 依赖合并到主干后自动打 tag、构建 21 个产物、生成校验和与说明、创建 GitHub Release；支持 `dry_run` 预演 |
+| `.github/workflows/release.yml` | 依赖升级入主干后自动打 tag、构建 21 个产物、生成校验和与说明、创建 GitHub Release；主链路为 `workflow_run`，另有 push tag / push master / 手动三条入口；支持 `dry_run` 预演 |
 | `.github/scripts/build-dist.sh` | 多平台构建与 `checksums.txt` 生成（本地可执行同一脚本做核对） |
 | `.github/scripts/upgrade-deps.sh` | 手动升级的执行体，含 go 指令行策略与各环节失败定位（`failed_step`） |
 | `.github/scripts/open-upgrade-pr.py` | 为升级分支开 PR（成功=普通 PR，失败=draft + `automerge-skip`） |
@@ -93,7 +94,7 @@ Dependabot PR ──▶ CI(mod/build-test) ──▶ automerge(squash 合并到 
 | `CI` | push master、所有针对 master 的 PR、手动 | 也用于给非 Dependabot 改动把关 |
 | `Automerge Dependabot` | `pull_request`（opened / synchronize / reopened / ready_for_review）且作者为 `dependabot[bot]`；或手动指定 PR 编号 | 作业内最多轮询 `WAIT_MINUTES=20` 分钟等 CI 出结论。只处理目标为 `master`、`mergeable=true`、无 `automerge-skip`/`do-not-merge`/`hold` 标签的 PR；合并后为合并提交补打 `dependencies` / `go` 标签（squash 会丢标签，供 Release 判定来源） |
 | `Dependency Upgrade` | 手动 `workflow_dispatch` | 输入：`mode`（`all`=`go get -u ./...`；`direct`=只升级直接依赖）、`go_directive`（默认 `no`，不动 go 指令行）、`target_branch`（留空自动生成） |
-| `Release` | ① push tag `v*`；② push master 且提交来自 `dependabot[bot]` 或信息含 `Bump` / `chore(deps)`；③ 手动（可指定 tag） | 手动触发时 `dry_run=true` 只构建不发布 |
+| `Release` | ① **`workflow_run`：Automerge Dependabot 以 success 结束**（自动合并后的主链路）；② push master 且提交信息含 `Bump` / `chore(deps)` 或作者为 dependabot[bot]（人工 PAT / 本地合并）；③ push tag `v*`；④ 手动（可指定 tag） | 自动路径（①②）额外过内容闸门：`prev_tag..HEAD` 必须改了 `go.mod` / `go.sum` 才发布；手动触发勾选 `dry_run=true` 只构建不发布 |
 
 自动合并的**降级策略**（不会静默关闭 PR）：CI 任一必需检查未通过、等待超时、未拿到任何 CI 结论、
 PR 有冲突或 `mergeable` 非 true、被人工打了暂缓标签 → 保留 PR、打 `automerge-skip` 标签并写明原因；
@@ -129,6 +130,8 @@ VERSION=v20261030.1 bash .github/scripts/build-dist.sh
 
 1. **提交并推送本目录**（`.github/` 全部文件 + `.gitignore`）到 `master`。
    Dependabot 配置文件只有在默认分支上才会被读取。
+   已实测（2026-10-30）：推送后 Dependabot 立即执行两个生态的更新作业，
+   配置校验从 failure 变 success，并开出 PR #4 / #5。
 2. **验证 CI**：Actions 页面应出现 `CI` 运行（push master 触发）。
    检查点：`mod`、`build-test` 两个 job 全绿；`Verify go.mod / go.sum are tidy` 未报错。
 3. **Release 预演（不发布）**：Actions → `Release` → Run workflow → 勾选 `dry_run=true`，
@@ -148,7 +151,8 @@ VERSION=v20261030.1 bash .github/scripts/build-dist.sh
    需等 Dependabot 下一次每日检查 rebase，或在 PR 下发 `@dependabot recreate` 重生成分支，
    新版的 automerge 工作流才会生效。
    检查点：PR 上出现 `mod` / `build-test` 两个检查 → 全绿后 `automerge` 作业轮询到结论并自动 approve + squash 合并 →
-   合并提交带 `dependencies` / `go` 标签 → `Release` 被 master 推送触发并发布新版本。
+   合并提交带 `dependencies` / `go` 标签 → **`Release` 由 `workflow_run` 接手**（不依赖被抑制的 push 事件）、
+   过内容闸门后打 tag 并发布新版本。
    反面样本（实测）：PR #4 把 `github.com/xtaci/smux` 从 1.5.58 升到 **2.0.1+incompatible**（major），
    编译报 `smuxConfig.Version undefined (type *smux.Config has no field or method Version)`，
    CI 红 → 不会被自动合并，应当看到 `automerge-skip` 标签与原因评论（这正是预期行为：major 不分组、需人工确认）。
@@ -170,7 +174,7 @@ VERSION=v20261030.1 bash .github/scripts/build-dist.sh
 | `PR 当前不可合并（mergeable=false）` | 与主干冲突 | 在 PR 上点 “Update branch” 或本地 rebase 后重推，CI 重新全绿会自动合并 |
 | `Resource not accessible by integration` / 合并被拒 | ① 工作流缺 `contents: write`（合并会写 master，实测必需）；② 分支保护要求 approval 而未配置可 approve 的账号 | 保持 `contents: write` + `pull-requests: write`；如要求 approval 则配 `AUTOMERGE_TOKEN`，或把 required_approving_review_count 设为 0。合并失败现在会保留 PR、打 `automerge-skip` 并把原始报错贴到 PR 评论 |
 | `gh: pull request is not mergeable` | 与上一条同类，或 squash 被仓库关闭 | `gh repo edit tobycroft/kcptun --enable-squash-merge` |
-| `Release` 未被 master 推送触发 | 合并提交信息里没有 `Bump` / `chore(deps)`，作者也不是 dependabot[bot] | 手动触发 `Release` 并指定 tag；今后保持 squash 标题前缀 `chore(deps):` |
+| `Release` 没被触发 | 最常见原因：触发它的 push 是由 `GITHUB_TOKEN` 写的（已被合并提交 `c0366e8e` 实测证实）—— 现在靠 `workflow_run` 补救；其次是 automerge 未成功（conclusion 不是 success）或 `go.mod` / `go.sum` 自上一个 tag 以来没变化 | 看 Automerge 运行是否 success；看 `Plan tag` 步骤输出的 `skip_reason`（会写明是 tag 序号、依然无依赖变更、还是 Release 已存在）；实在需要发布就手动触发 `Release` 并指定 tag |
 | 发布只出了一半资产就中断 | tag 已存在但 Release 缺失 | 再次手动触发同一 tag，工作流会走「补齐资产」分支（`gh release upload --clobber`） |
 | `go get -u=patch` 报错 `can't query version "patch" of module ...` | 该写法会把主模块自身纳入查询，主模块无发布版本 | 已避开：`mode=all` 用 `go get -u ./...`，`mode=direct` 只对直接依赖执行 `go get -u` |
 | `setup-go` 找不到 Go 版本 | 三处版本号写死为 `1.27.3` | 升级工具链时同步 `ci.yml`、`release.yml`、`dependency-upgrade.yml` 与 `go.mod` |
