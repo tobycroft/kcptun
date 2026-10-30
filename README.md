@@ -11,6 +11,8 @@
 - **安全**：预共享密钥 + 可选加密、压缩、QPP
 - **稳定**：支持端口定时轮换，且不切断已建立的连接
 
+![架构图](assets/architecture.png)
+
 ## 一键部署服务端（推荐）
 
 服务端推荐用 [kcptun-script](https://github.com/TuuzNet/kcptun-script) 一键脚本安装，自动完成下载、配置、守护和防火墙设置：
