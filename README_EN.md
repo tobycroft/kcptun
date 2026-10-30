@@ -9,6 +9,8 @@ A TCP-over-KCP tunnel: the client multiplexes local TCP connections onto KCP (UD
 - **Security**: pre-shared key plus optional encryption, compression, and QPP
 - **Stability**: periodic port rotation without dropping established connections
 
+> Details such as manual setup, configuration examples, parameters, and differences from upstream are collapsed by default — click a section title to expand it.
+
 ## One-Click Server Setup (Recommended)
 
 The server can be installed with the [kcptun-script](https://github.com/TuuzNet/kcptun-script) installer, which handles downloads, configuration, process supervision, and firewall rules:
@@ -42,7 +44,10 @@ Common commands:
 
 > The script requires root, supports Debian/Ubuntu, CentOS/Fedora/RedHat and similar distributions, and only runs on x86 / x86_64.
 
-## Manual Setup
+<details>
+<summary><strong>Manual Setup</strong> (download · start · background)</summary>
+
+### Manual Setup
 
 ### 1. Download
 
@@ -107,7 +112,12 @@ WantedBy=multi-user.target
 systemctl daemon-reload && systemctl enable --now kcptun
 ```
 
-## Configuration Examples
+</details>
+
+<details>
+<summary><strong>Configuration Examples</strong> (server-config.json / client-config.json)</summary>
+
+### Configuration Examples
 
 ### Server: server-config.json
 
@@ -179,7 +189,12 @@ Notes:
 - Windows are mirrored: client `sndwnd` = server `rcvwnd`, and client `rcvwnd` = server `sndwnd`
 - `autoexpire: 300` + `autoexpiremax: 360` rotates the local port every 300–360 seconds at random; set both to `0` to keep a fixed port
 
-## Parameters
+</details>
+
+<details>
+<summary><strong>Parameters</strong> (full server / client parameter tables)</summary>
+
+### Parameters
 
 ### Server
 
@@ -222,14 +237,24 @@ The client accepts every transport parameter above (same meaning) plus:
 | `scavengettl` | int | `0` | Force-close deadline in seconds for retired connections, `0` means never force close (recommended) |
 | `closewait` | int | `0` | Seconds to wait before tearing down a connection |
 
-## Differences from Upstream kcptun
+</details>
+
+<details>
+<summary><strong>Differences from Upstream kcptun</strong></summary>
+
+### Differences from Upstream kcptun
 
 1. **New `autoexpiremax`**: the rotation time is randomized within `[autoexpire, autoexpiremax]` seconds, so connections do not all switch at once.
 2. **Rotation no longer drops connections**: after expiry, new connections use the new port while existing ones keep running on the old session until they finish naturally.
 3. **`scavengettl` defaults to 0**: sessions with live connections are never force-closed unless you explicitly set a deadline.
 4. **Bounded resources and cleaner logs**: at most `conn` retired sessions are kept (total ≤ `2 × conn`), and normal teardown no longer prints `use of closed network connection`.
 
-## Build from Source
+</details>
+
+<details>
+<summary><strong>Build from Source</strong></summary>
+
+### Build from Source
 
 ```sh
 go build -o client/client ./client
@@ -245,7 +270,12 @@ Release assets):
 VERSION=v20261030.1 bash .github/scripts/build-dist.sh
 ```
 
-## Automation Pipeline
+</details>
+
+<details>
+<summary><strong>Automation Pipeline</strong></summary>
+
+### Automation Pipeline
 
 Third-party dependency updates (Dependabot) → CI (`gofmt` / `go vet` / build / tests) →
 auto-merge (squash) → multi-platform build + SHA-256 checksums → automatic tag and GitHub
@@ -255,6 +285,8 @@ above.
 
 See [`.github/AUTOMATION.md`](.github/AUTOMATION.md) for the full flow, required repository
 settings, first-run verification steps and troubleshooting.
+
+</details>
 
 ## Acknowledgements
 

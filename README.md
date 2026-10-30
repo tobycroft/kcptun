@@ -13,6 +13,8 @@
 
 ![架构图](assets/architecture.png)
 
+> 下文的手动部署、配置示例、参数说明、丢包测试细节等章节默认收起，点击标题即可展开。
+
 ## 一键部署服务端（推荐）
 
 服务端推荐用 [kcptun-script](https://github.com/TuuzNet/kcptun-script) 一键脚本安装，自动完成下载、配置、守护和防火墙设置：
@@ -46,7 +48,10 @@ sh kcptun.sh
 
 > 脚本需要 root 权限，支持 Debian/Ubuntu、CentOS/Fedora/RedHat 等主流发行版，仅支持 x86 / x86_64 架构。
 
-## 手动部署
+<details>
+<summary><strong>手动部署</strong>（下载 · 启动 · 后台运行）</summary>
+
+### 手动部署
 
 ### 1. 下载
 
@@ -111,7 +116,12 @@ WantedBy=multi-user.target
 systemctl daemon-reload && systemctl enable --now kcptun
 ```
 
-## 配置示例
+</details>
+
+<details>
+<summary><strong>配置示例</strong>（server-config.json / client-config.json）</summary>
+
+### 配置示例
 
 ### 服务端 server-config.json
 
@@ -183,7 +193,12 @@ systemctl daemon-reload && systemctl enable --now kcptun
 - 窗口镜像：客户端 `sndwnd` = 服务端 `rcvwnd`，客户端 `rcvwnd` = 服务端 `sndwnd`
 - 上面的 `autoexpire: 300` + `autoexpiremax: 360` 表示每 300~360 秒（随机）更换一次端口；不需要轮换时把两者都设为 `0` 即可固定端口
 
-## 参数说明
+</details>
+
+<details>
+<summary><strong>参数说明</strong>（服务端 / 客户端全量参数表）</summary>
+
+### 参数说明
 
 ### 服务端
 
@@ -226,11 +241,16 @@ systemctl daemon-reload && systemctl enable --now kcptun
 | `scavengettl` | int | `0` | 旧连接强制回收时限（秒），0 表示永不强制关闭（推荐） |
 | `closewait` | int | `0` | 连接拆除前的等待时间（秒） |
 
+</details>
+
 ## 丢包测试
 
 客户端内置了一个基于 KCP OOB 的丢包测试模式，用来回答“线路到底丢不丢包、延迟稳不稳”。
 
-### 原理
+<details>
+<summary><strong>丢包测试</strong> · 原理</summary>
+
+### 丢包测试 · 原理
 
 KCP 的可靠传输会把丢失的包重传补上，所以从业务流里看不到丢包；`ping`/`mtr` 测的又是 ICMP，而很多运营商对 ICMP 和 UDP 的策略并不相同。丢包测试使用 kcp-go 的 OOB（out-of-band）通道：
 
@@ -241,7 +261,12 @@ KCP 的可靠传输会把丢失的包重传补上，所以从业务流里看不�
 
 因此它测到的是“KCP 会话所走 UDP 链路的真实表现”，不会被重传掩盖。
 
-### 前提条件
+</details>
+
+<details>
+<summary><strong>丢包测试</strong> · 前提条件</summary>
+
+### 丢包测试 · 前提条件
 
 | 条件 | 说明 |
 | --- | --- |
@@ -252,7 +277,12 @@ KCP 的可靠传输会把丢失的包重传补上，所以从业务流里看不�
 
 服务端无需额外配置，新版本会在每个 KCP 会话上自动注册丢包测试服务逻辑，只响应带测试标记的 OOB 包。
 
-### 使用方式
+</details>
+
+<details>
+<summary><strong>丢包测试</strong> · 使用方式与输出示例</summary>
+
+### 丢包测试 · 使用方式与输出示例
 
 客户端命令（传输参数需与服务端一致）：
 
@@ -294,7 +324,12 @@ send errors   : 0
 ==========================================================
 ```
 
-### 参数说明
+</details>
+
+<details>
+<summary><strong>丢包测试</strong> · 参数说明</summary>
+
+### 丢包测试 · 参数说明
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
@@ -304,7 +339,12 @@ send errors   : 0
 | `losstest-size` | `64` | OOB 探测包字节数（32-1024） |
 | `losstest-pps` | `20000` | `full` 档速率上限；调低可进一步减少对业务的影响 |
 
-### 档位选择与环境适用性
+</details>
+
+<details>
+<summary><strong>丢包测试</strong> · 档位选择与环境适用性</summary>
+
+### 丢包测试 · 档位选择与环境适用性
 
 | 档位 | 速率 | 额外流量 | 适用环境 | 建议时长 |
 | --- | --- | --- | --- | --- |
@@ -325,7 +365,12 @@ send errors   : 0
 - 跨境线路时段性抖动——在问题时段跑 60 秒低速，重点看 RTT p95 与 jitter；
 - 调整 FEC 前后对比——用同一档位、同一时长做前后基线。
 
-### 结果解读
+</details>
+
+<details>
+<summary><strong>丢包测试</strong> · 结果解读</summary>
+
+### 丢包测试 · 结果解读
 
 | 指标 | 参考 |
 | --- | --- |
@@ -337,21 +382,36 @@ send errors   : 0
 | jitter 持续偏高 | 链路不稳定（移动网络、跨境拥塞） |
 | 接近 100% 丢失 | 服务端未升级、FEC 未开启、端口不通或 UDP 被拦截 |
 
-### 限制
+</details>
+
+<details>
+<summary><strong>丢包测试</strong> · 限制</summary>
+
+### 丢包测试 · 限制
 
 - 上下行分别统计，下行在客户端计数、上行由服务端回报计数；总测试时长约为单方向时长的两倍；
 - OOB 探测本身不受 FEC 保护，这是有意设计——只有不经纠错/重传，才能看到链路真实丢包；
 - `full` 档默认上限 20000 pps，避免发送端队列静默丢弃污染结果；本机性能较弱或带宽较小时，可调低 `-losstest-pps`；
 - 手机端客户端暂不支持该测试。
 
-## 与上游 kcptun 的差异
+</details>
+
+<details>
+<summary><strong>与上游 kcptun 的差异</strong></summary>
+
+### 与上游 kcptun 的差异
 
 1. **新增 `autoexpiremax`**：端口轮换时间在 `[autoexpire, autoexpiremax]` 秒内随机，避免多条连接集中切换。
 2. **轮换不再断连**：到期后新连接走新端口，旧连接留在旧会话上继续收发，等自然结束后才关闭。
 3. **`scavengettl` 默认 0**：默认永不强制关闭仍有连接的会话，只有显式设置才会兜底回收。
 4. **资源有上限、日志更干净**：最多保留 `conn` 条待回收会话（总量 ≤ `2 × conn`）；正常关闭不再打印 `use of closed network connection`。
 
-## 从源码构建
+</details>
+
+<details>
+<summary><strong>从源码构建</strong></summary>
+
+### 从源码构建
 
 ```sh
 go build -o client/client ./client
@@ -366,7 +426,12 @@ go build -o server/server ./server
 VERSION=v20261030.1 bash .github/scripts/build-dist.sh
 ```
 
-## 自动化流水线
+</details>
+
+<details>
+<summary><strong>自动化流水线</strong></summary>
+
+### 自动化流水线
 
 第三方依赖更新（Dependabot）→ CI（编译 / go vet / gofmt / 测试）→ 自动合并（squash）→
 多平台打包 + SHA-256 校验和 → 自动打 tag 并发布 GitHub Release，已全部由 GitHub Actions 接手。
@@ -374,6 +439,8 @@ VERSION=v20261030.1 bash .github/scripts/build-dist.sh
 
 流程细节、需要开启的仓库设置、首次验证步骤与常见问题排查见
 [`.github/AUTOMATION.md`](.github/AUTOMATION.md)。
+
+</details>
 
 ## 致谢
 
