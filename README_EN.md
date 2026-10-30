@@ -236,7 +236,7 @@ go build -o client/client ./client
 go build -o server/server ./server
 ```
 
-Requires Go 1.26+.
+Requires Go 1.27+.
 
 ## License
 
