@@ -372,12 +372,12 @@ func main() {
 				log.Println("SetWriteBuffer:", err)
 			}
 
-			// Loss test echo is stateless and only serves one-shot tests; probes
-			// are ignored unless they carry the test magic. It requires FEC, so
-			// skip registration entirely when FEC is disabled.
+			// Loss test serving is stateless and only serves one-shot tests;
+			// probes are ignored unless they carry the test magic. It requires
+			// FEC, so skip registration entirely when FEC is disabled.
 			lossTestEcho := config.DataShard > 0 && config.ParityShard > 0
 			if !lossTestEcho {
-				log.Println("loss test echo disabled: FEC is not enabled")
+				log.Println("loss test disabled: FEC is not enabled")
 			}
 			for {
 				if conn, err := lis.AcceptKCP(); err == nil {
@@ -389,8 +389,8 @@ func main() {
 					conn.SetWindowSize(config.SndWnd, config.RcvWnd)
 					conn.SetACKNoDelay(config.AckNodelay)
 					if lossTestEcho {
-						if err := std.RegisterLossTestEcho(conn); err != nil {
-							log.Println("loss test echo disabled (FEC is required):", err)
+						if err := std.RegisterLossTestServer(conn); err != nil {
+							log.Println("loss test disabled (FEC is required):", err)
 						}
 					}
 

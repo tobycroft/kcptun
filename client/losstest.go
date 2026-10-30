@@ -107,9 +107,34 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%.2fms", float64(d)/float64(time.Millisecond))
 }
 
-// runLossTest sends unreliable OOB probes to the server and reports loss/RTT.
-// The server echoes probes back, so the result covers both directions of the
-// UDP path without being masked by KCP retransmission.
+// waitLossTestReport waits for a report control packet of the given phase,
+// re-sending the trigger through resend every retry interval because OOB
+// packets are unreliable. Returns nil on timeout.
+func waitLossTestReport(ch chan std.LossTestCtrl, phase byte, timeout, retry time.Duration, resend func()) *std.LossTestCtrl {
+	deadline := time.After(timeout)
+	ticker := time.NewTicker(retry)
+	defer ticker.Stop()
+	for {
+		select {
+		case c := <-ch:
+			if c.Phase == phase {
+				cc := c
+				return &cc
+			}
+		case <-ticker.C:
+			resend()
+		case <-deadline:
+			return nil
+		}
+	}
+}
+
+// runLossTest measures packet loss in two sequential phases and exits.
+// Phase 1 (downlink): the server sends OOB probes to the client, the client
+// counts what arrives, so the result covers only the server -> client path.
+// Phase 2 (uplink): the client sends OOB probes, the server counts what it
+// receives and reports the number back, so the result covers only the
+// client -> server path; echoed probes additionally provide RTT / jitter.
 func runLossTest(config *Config, block kcp.BlockCrypt) error {
 	if config.DataShard <= 0 || config.ParityShard <= 0 {
 		return fmt.Errorf("losstest requires FEC: datashard and parityshard must both be > 0 on client and server")
@@ -209,14 +234,28 @@ func runLossTest(config *Config, block kcp.BlockCrypt) error {
 	}
 	defer session.Close()
 
-	stats := &lossTestStats{bitmap: make([]uint64, 4096)}
 	testID := uint64(time.Now().UnixNano()) ^ rand.Uint64()
+	dlStats := &lossTestStats{bitmap: make([]uint64, 4096)}
+	ulStats := &lossTestStats{bitmap: make([]uint64, 4096)}
+	reportCh := make(chan std.LossTestCtrl, 4)
 	if err := conn.SetOOBHandler(func(b []byte) {
-		id, seq, sent, ok := std.DecodeLossTestPacket(b)
-		if !ok || id != testID {
+		if c, ok := std.DecodeLossTestCtrl(b); ok {
+			if c.Type == std.LossTestCtrlReport && c.ID == testID {
+				select {
+				case reportCh <- c:
+				default:
+				}
+			}
 			return
 		}
-		stats.record(seq, time.Since(sent))
+		if p, ok := std.DecodeLossTestPacket(b); ok && p.ID == testID {
+			switch p.Dir {
+			case std.LossTestDirDownlink:
+				dlStats.record(p.Seq, time.Since(p.Sent))
+			default:
+				ulStats.record(p.Seq, time.Since(p.Sent))
+			}
+		}
 	}); err != nil {
 		return fmt.Errorf("enable OOB receive (FEC required): %w", err)
 	}
@@ -231,14 +270,55 @@ func runLossTest(config *Config, block kcp.BlockCrypt) error {
 	fmt.Printf("==================== KCPTUN LOSS TEST ====================\n")
 	fmt.Printf("target        : %v\n", conn.RemoteAddr())
 	fmt.Printf("local         : %v\n", conn.LocalAddr())
-	fmt.Printf("duration      : %ds\n", duration)
 	fmt.Printf("rate          : %s\n", rateDesc)
 	fmt.Printf("payload       : %d bytes\n", size)
-	fmt.Printf("----------------------------------------------------------\n")
+	fmt.Printf("duration      : %ds per direction\n", duration)
 
-	// Give the server a moment to install the echo handler after AcceptKCP.
+	// Give the server a moment to install the loss test handler after AcceptKCP.
 	time.Sleep(500 * time.Millisecond)
 
+	ctrl := make([]byte, std.LossTestCtrlSize)
+
+	// ---- phase 1: downlink (server -> client) ----
+	fmt.Printf("----------------------------------------------------------\n")
+	fmt.Printf("phase 1       : downlink (server -> client)\n")
+	sendStart := func() {
+		std.EncodeLossTestCtrl(ctrl, testID, std.LossTestCtrlDownlinkStart, 0,
+			uint64(duration), uint64(pps), uint64(size))
+		_ = conn.SendOOB(ctrl)
+	}
+	sendStart()
+	dlReport := waitLossTestReport(reportCh, std.LossTestDirDownlink,
+		time.Duration(duration)*time.Second+lossTestDrain+10*time.Second,
+		3*time.Second, sendStart)
+
+	// Drain: keep receiving late probes before computing the result.
+	time.Sleep(lossTestDrain)
+
+	dlStats.mu.Lock()
+	dlReceived := dlStats.received
+	dlStats.mu.Unlock()
+	if dlReport != nil {
+		serverSent := dlReport.Y
+		if dlReceived > serverSent {
+			dlReceived = serverSent
+		}
+		lost := serverSent - dlReceived
+		lossPct := 0.0
+		if serverSent > 0 {
+			lossPct = float64(lost) * 100 / float64(serverSent)
+		}
+		fmt.Printf("sent          : %d packets (by server)\n", serverSent)
+		fmt.Printf("received      : %d packets (at client)\n", dlReceived)
+		fmt.Printf("lost          : %d packets (%.3f%%)\n", lost, lossPct)
+	} else {
+		fmt.Printf("downlink      : no report from server, result unavailable\n")
+		fmt.Printf("                (server may be running an older version)\n")
+	}
+
+	// ---- phase 2: uplink (client -> server) ----
+	fmt.Printf("----------------------------------------------------------\n")
+	fmt.Printf("phase 2       : uplink (client -> server)\n")
 	buf := make([]byte, size)
 	deadline := time.Now().Add(time.Duration(duration) * time.Second)
 	started := time.Now()
@@ -248,7 +328,7 @@ func runLossTest(config *Config, block kcp.BlockCrypt) error {
 	for time.Now().Before(deadline) {
 		for i := 0; i < batch; i++ {
 			seq++
-			std.EncodeLossTestPacket(buf, testID, seq, time.Now())
+			std.EncodeLossTestPacket(buf, testID, seq, time.Now(), std.LossTestDirUplink)
 			if err := conn.SendOOB(buf); err != nil {
 				sendErrs++
 			}
@@ -261,54 +341,64 @@ func runLossTest(config *Config, block kcp.BlockCrypt) error {
 	// Drain: keep receiving late echoes before computing the result.
 	time.Sleep(lossTestDrain)
 
-	stats.mu.Lock()
-	received := stats.received
-	if received > sent {
-		received = sent
+	sendEnd := func() {
+		std.EncodeLossTestCtrl(ctrl, testID, std.LossTestCtrlUplinkEnd, 0, 0, 0, 0)
+		_ = conn.SendOOB(ctrl)
 	}
-	rttMin := stats.rttMin
-	rttMax := stats.rttMax
+	sendEnd()
+	ulReport := waitLossTestReport(reportCh, std.LossTestDirUplink,
+		10*time.Second, time.Second, sendEnd)
+
+	ulStats.mu.Lock()
+	rttMin := ulStats.rttMin
+	rttMax := ulStats.rttMax
 	var rttAvg time.Duration
-	if stats.rttCount > 0 {
-		rttAvg = stats.rttSum / time.Duration(stats.rttCount)
+	if ulStats.rttCount > 0 {
+		rttAvg = ulStats.rttSum / time.Duration(ulStats.rttCount)
 	}
-	p50 := stats.percentileLocked(0.50)
-	p95 := stats.percentileLocked(0.95)
-	p99 := stats.percentileLocked(0.99)
-	rttCount := stats.rttCount
-	jitter := time.Duration(stats.jitter)
-	stats.mu.Unlock()
+	p50 := ulStats.percentileLocked(0.50)
+	p95 := ulStats.percentileLocked(0.95)
+	p99 := ulStats.percentileLocked(0.99)
+	rttCount := ulStats.rttCount
+	jitter := time.Duration(ulStats.jitter)
+	ulStats.mu.Unlock()
 
-	lost := sent - received
-	lossPct := 0.0
-	if sent > 0 {
-		lossPct = float64(lost) * 100 / float64(sent)
+	if ulReport != nil {
+		serverReceived := ulReport.X
+		if serverReceived > sent {
+			serverReceived = sent
+		}
+		lost := sent - serverReceived
+		lossPct := 0.0
+		if sent > 0 {
+			lossPct = float64(lost) * 100 / float64(sent)
+		}
+		fmt.Printf("sent          : %d packets (by client)\n", sent)
+		fmt.Printf("received      : %d packets (at server)\n", serverReceived)
+		fmt.Printf("lost          : %d packets (%.3f%%)\n", lost, lossPct)
+	} else {
+		fmt.Printf("sent          : %d packets (by client)\n", sent)
+		fmt.Printf("uplink        : no report from server, loss unavailable\n")
+		fmt.Printf("                (server may be running an older version)\n")
 	}
-	actualPPS := 0.0
-	if elapsed > 0 {
-		actualPPS = float64(sent) / elapsed.Seconds()
-	}
-
-	fmt.Printf("sent          : %d packets\n", sent)
-	fmt.Printf("received      : %d packets\n", received)
-	fmt.Printf("lost          : %d packets (%.3f%%)\n", lost, lossPct)
 	if rttCount > 0 {
-		fmt.Printf("rtt           : min %s / avg %s / p50 %s / p95 %s / p99 %s / max %s\n",
+		fmt.Printf("rtt (echo)    : min %s / avg %s / p50 %s / p95 %s / p99 %s / max %s\n",
 			formatDuration(rttMin), formatDuration(rttAvg), formatDuration(p50),
 			formatDuration(p95), formatDuration(p99), formatDuration(rttMax))
 		fmt.Printf("jitter        : %s\n", formatDuration(jitter))
 	} else {
-		fmt.Printf("rtt           : n/a (no echo received)\n")
+		fmt.Printf("rtt (echo)    : n/a (no echo received)\n")
 	}
-	fmt.Printf("actual rate   : %.0f pps over %s\n", actualPPS, elapsed.Round(time.Millisecond))
+	fmt.Printf("actual rate   : %.0f pps over %s\n", float64(sent)/elapsed.Seconds(), elapsed.Round(time.Millisecond))
 	fmt.Printf("send errors   : %d\n", sendErrs)
-	if lossPct >= 99.9 && sent > 0 {
+	if rttCount == 0 && sent > 0 {
 		fmt.Printf("hint          : no echo received, make sure the server runs the\n")
 		fmt.Printf("                matching version with FEC enabled (datashard/parityshard > 0)\n")
 	}
-	fmt.Printf("note          : OOB probes bypass KCP retransmission, so the loss rate\n")
-	fmt.Printf("                reflects the raw UDP path; full rate may include local\n")
-	fmt.Printf("                queue drops under saturation\n")
+	fmt.Printf("note          : OOB probes bypass KCP retransmission, so the loss rates\n")
+	fmt.Printf("                reflect the raw UDP path; downlink is measured at the\n")
+	fmt.Printf("                client, uplink is reported by the server; full rate may\n")
+	fmt.Printf("                include local queue drops under saturation\n")
 	fmt.Printf("==========================================================\n")
 
 	return nil
