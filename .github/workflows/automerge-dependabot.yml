@@ -29,7 +29,9 @@ on:
         default: ''
 
 permissions:
-  contents: read
+  # contents: write 是必需的：合并 PR 会向 master 写入新提交，
+  # 只有 pull-requests: write 时 gh pr merge 会拿到 403（实测 run #3 就挂在合并步骤）。
+  contents: write
   pull-requests: write
 
 concurrency:
@@ -253,9 +255,26 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh pr merge "${pr_number}" --repo "${{ github.repository }}" \
+          # 合并失败（常见为凭据权限不足或平台临时拒接）时不直接红叉了事：
+          # 转入降级分支，保留 PR + 打 automerge-skip 标签 + 把原始报错写到 PR 评论，
+          # 同时由最后一步把 job 标为失败。
+          merge_out="$(gh pr merge "${pr_number}" --repo "${{ github.repository }}" \
             --squash --delete-branch \
-            --subject "chore(deps): ${pr_title} (#${pr_number})"
+            --subject "chore(deps): ${pr_title} (#${pr_number})" 2>&1)" || {
+            echo "${merge_out}"
+            echo "decision=skip" >> "${GITHUB_ENV}"
+            {
+              echo 'reason<<__EOF__'
+              echo "调用 merge 失败（HTTP/权限类错误），保留 PR 供人工处理："
+              echo ''
+              echo '```'
+              printf '%s\n' "${merge_out}"
+              echo '```'
+              echo __EOF__
+            } >> "${GITHUB_ENV}"
+            echo "merge_attempt_failed=true" >> "${GITHUB_ENV}"
+            exit 0
+          }
           echo "merged=true" >> "${GITHUB_ENV}"
 
       - name: Restore labels after squash merge
@@ -274,7 +293,7 @@ jobs:
           echo "已为合并提交 ${merge_sha} 补打 dependencies / go 标签"
 
       - name: Report skip (keep PR open)
-        if: env.decision == 'skip'
+        if: always() && env.decision == 'skip'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -303,3 +322,11 @@ jobs:
             echo "- CI 结论：${ci_results:-无}"
             echo "- 跳过原因：${reason:-无}"
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      # 降级处理完成后才把 job 标为失败，便于在 Actions 列表里直接看出问题
+      - name: Fail job when merge attempt errored
+        if: env.merge_attempt_failed == 'true'
+        run: |
+          set -euo pipefail
+          echo "::error::自动合并调用失败，已在 PR #${pr_number} 上留下原因评论，详情见上一步日志"
+          exit 1

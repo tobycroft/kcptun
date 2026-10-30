@@ -19,6 +19,7 @@
 | 仓库状态 | 非 fork、公开、无 open PR/issue（因此新工作流不会与存量运行纠缠） |
 | 已注册工作流 | 推送后 4 个工作流均为 `active`（API `actions/workflows`） |
 | 首轮回环实测 | CI(push master) 全绿；`Release` 与 `Automerge` 正确判定为 skipped；Dependabot 立即跑出 `go_modules` 与 `github_actions` 两个更新作业并开出 PR #4/#5 |
+| 自动合并路径实测 | PR #5（actions 分组）的 `mod` / `build-test` 全绿，automerge 作业依次走完 resolve → 等 CI → 闸门通过 → approve → **卡在 merge 步骤（缺 contents: write）**；已修正，合并失败也会走降级分支保留 PR |
 | check_run 不可靠 | **Dependabot PR 上的 `check_run` 事件不会为本仓库工作流创建运行**（只有 master 自身推送的检查会触发），因此自动合并改用 `pull_request` 触发 + 作业内轮询 CI |
 
 > 一键脚本仓库 `TuuzNet/kcptun-script` 已有自己的 `release.yml`（发布 `kcptun.sh` 本身），
@@ -77,7 +78,8 @@ Dependabot PR ──▶ CI(mod/build-test) ──▶ automerge(squash 合并到 
    `GITHUB_TOKEN` 也不能给自己创建的 PR 投 approval。未配置该 secret 时，approve 步骤会打印提示并跳过。
 5. **权限**：所有工作流都显式声明最小权限且只用 `secrets.*`，仓库内**不含任何硬编码 token**：
    - `ci.yml`：`contents: read`
-   - `automerge-dependabot.yml`：`contents: read` + `pull-requests: write`
+   - `automerge-dependabot.yml`：`contents: write` + `pull-requests: write`
+     （实测：只有 `pull-requests: write` 时 `gh pr merge` 会 403，因为合并要向 master 写提交）
    - `dependency-upgrade.yml`：`contents: write` + `pull-requests: write`
    - `release.yml`：`contents: write`（推 tag、创建 Release、上传资产）
 
@@ -166,7 +168,7 @@ VERSION=v20261030.1 bash .github/scripts/build-dist.sh
 | `Automerge` 没跑 | ① 触发已改为 `pull_request`（`check_run` 在 Dependabot PR 上不会创建运行）；② PR 头分支里仍旧着旧版工作流文件 | 确认 PR 作者为 `dependabot[bot]`；必要时 `@dependabot recreate` 重生成分支；或用 `workflow_dispatch` 填入 PR 编号补跑 |
 | `不自动合并：必需检查 mod 未通过（结论：failure）` | CI 真的失败 | 按 `automerge-skip` 标签与 PR 评论修代码/回滚该依赖 |
 | `PR 当前不可合并（mergeable=false）` | 与主干冲突 | 在 PR 上点 “Update branch” 或本地 rebase 后重推，CI 重新全绿会自动合并 |
-| `Resource not accessible by integration` / 合并被拒 | 分支保护要求 approval，而未配置可 approve 的账号 | 设置 `AUTOMERGE_TOKEN`（另一账号的 PAT），或把 required_approving_review_count 设为 0 |
+| `Resource not accessible by integration` / 合并被拒 | ① 工作流缺 `contents: write`（合并会写 master，实测必需）；② 分支保护要求 approval 而未配置可 approve 的账号 | 保持 `contents: write` + `pull-requests: write`；如要求 approval 则配 `AUTOMERGE_TOKEN`，或把 required_approving_review_count 设为 0。合并失败现在会保留 PR、打 `automerge-skip` 并把原始报错贴到 PR 评论 |
 | `gh: pull request is not mergeable` | 与上一条同类，或 squash 被仓库关闭 | `gh repo edit tobycroft/kcptun --enable-squash-merge` |
 | `Release` 未被 master 推送触发 | 合并提交信息里没有 `Bump` / `chore(deps)`，作者也不是 dependabot[bot] | 手动触发 `Release` 并指定 tag；今后保持 squash 标题前缀 `chore(deps):` |
 | 发布只出了一半资产就中断 | tag 已存在但 Release 缺失 | 再次手动触发同一 tag，工作流会走「补齐资产」分支（`gh release upload --clobber`） |
