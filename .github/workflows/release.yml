@@ -3,8 +3,14 @@
 # 触发条件：
 #   1. workflow_run: Automerge Dependabot 完成且成功 —— 自动合并后的主链路。
 #      为何需要它：实测（合并提交 c0366e8e）GITHUB_TOKEN 合并产生的 push 不会
-#      再触发任何工作流（GitHub 防循环抑制），所以上一个 tag 之后的依赖变更靠 workflow_run 驱动。
-#   2. push: master 且提交信息疑似依赖类 —— 人工用 PAT / 本地合并依赖升级时的自动发布
+#      再触发任何工作流（GitHub 防循环抑制），所以自动合并后的发布靠 workflow_run 驱动。
+#   2. push: master 任意提交 —— 人工用 PAT / 本地合并后的自动发布入口。
+#      不在 job 级 if 里做提交信息启发式判断：依赖是否真的变了，由作业内的
+#      内容闸门比较 prev_tag..HEAD 的 go.mod / go.sum 作权威判定（避免靠关键字、
+#      也避免为了触发发布而写误导性提交标题）。
+#      （注：不要在 job 级 if 里访问 payload 中不存在的属性，例如 push 事件的
+#       head_commit.author.login（只有 name/email/username）与 ref_type（仅 create/delete 有）；
+#       引用不存在的属性会让条件求值失败，整个 run 被静默标为 skipped且无任何报错）
 #   3. push: tags 'v*'            —— 手工推 tag 时按 tag 发布
 #   4. workflow_dispatch          —— 手动发布，或 dry_run 预演（只构建不发布）
 #
@@ -51,16 +57,9 @@ jobs:
     name: build
     runs-on: ubuntu-latest
     if: >-
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch != 'master') ||
-      (github.event_name != 'push' && github.event_name != 'workflow_run') ||
-      (github.event_name == 'push' &&
-       (github.event.ref_type == 'tag' ||
-        (github.event.ref_type == 'branch' &&
-         (github.event.head_commit.author.login == 'dependabot[bot]' ||
-          contains(github.event.head_commit.message, 'Bump') ||
-          contains(github.event.head_commit.message, 'chore(deps)')))))
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch != 'master')
     outputs:
       tag: ${{ steps.plan.outputs.tag }}
       prev_tag: ${{ steps.plan.outputs.prev_tag }}
@@ -75,14 +74,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Setup Go
-        uses: actions/setup-go@v7
-        with:
-          # 与既有 Release 的构建工具链保持一致（v20261030.1 使用 Go 1.27.3）。
-          # 升级 go 指令行时请同步这里与 ci.yml。
-          go-version: '1.27.3'
-          check-latest: false
-
+      # 先算 tag 与闸门，不通过就不安装 Go，省 runner 时间
       # 规划目标 tag：优先 workflow_dispatch 输入 > tag push > 沿用既有 vYYYYMMDD[.N] 规则
       - name: Plan tag
         id: plan
@@ -94,6 +86,14 @@ jobs:
           skip=''
           reason=''
           existing_tags="$(git tag --list 'v*' | sort)"
+
+          # 是否推的是 tag：只看 github.ref 前缀（push payload 没有 ref_type 字段），
+          # 在 shell 里用 case 语句判定，避开在单引号内做表达式插值的写法
+          # （注：workflow 内所有双花括号插值都会被当作表达式解析，注释里也不能写占位形式）
+          is_tag_push=false
+          case '${{ github.ref }}' in
+            refs/tags/*) is_tag_push=true ;;
+          esac
 
           # 纯 bash 判存在，不用 `printf | grep -q`：pipefail 下 grep 提前退出会使
           # 上游 printf 收到 SIGPIPE，导致「已存在的 tag」被误判为不存在而重复用 tag
@@ -109,7 +109,7 @@ jobs:
 
           if [ "${{ github.event_name }}" = 'workflow_dispatch' ] && [ -n "${INPUT_TAG}" ]; then
             tag="${INPUT_TAG}"
-          elif [ "${{ github.event.ref_type }}" = 'tag' ]; then
+          elif [ "${is_tag_push}" = 'true' ]; then
             tag='${{ github.ref_name }}'
           else
             # 与现有 tag 风格一致：日期版本 + 同日多次发布时追加 .N
@@ -154,7 +154,7 @@ jobs:
           # 内容闸门：自动路径必须真的有 go.mod / go.sum 变更（推 tag 与手动触发属显式意图，不受限）
           if [ -z "${skip}" ]; then
             if [ '${{ github.event_name }}' = 'workflow_run' ] ||
-               { [ '${{ github.event_name }}' = 'push' ] && [ '${{ github.event.ref_type }}' != 'tag' ]; }; then
+               { [ '${{ github.event_name }}' = 'push' ] && [ "${is_tag_push}" != 'true' ]; }; then
               if [ -z "${prev_tag}" ]; then
                 skip='true'
                 reason='仓库没有可对比的上一个 tag，自动路径不做猜测式发布；请手动触发并指定 tag'
@@ -176,6 +176,15 @@ jobs:
           echo "skip=${skip}" >> "${GITHUB_OUTPUT}"
           echo "skip_reason=${reason}" >> "${GITHUB_OUTPUT}"
           echo "目标 tag：${tag}（上一个 tag：${prev_tag:-无}）"
+
+      - name: Setup Go
+        if: steps.plan.outputs.skip != 'true'
+        uses: actions/setup-go@v7
+        with:
+          # 与既有 Release 的构建工具链保持一致（v20261030.1 使用 Go 1.27.3），
+          # 并与 go.mod 新增的 toolchain 声明对齐。
+          go-version: '1.27.3'
+          check-latest: false
 
       - name: Build all platforms
         if: steps.plan.outputs.skip != 'true'

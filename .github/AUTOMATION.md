@@ -20,7 +20,8 @@
 | 已注册工作流 | 推送后 4 个工作流均为 `active`（API `actions/workflows`） |
 | 首轮回环实测 | CI(push master) 全绿；`Release` 与 `Automerge` 正确判定为 skipped；Dependabot 立即跑出 `go_modules` 与 `github_actions` 两个更新作业并开出 PR #4/#5 |
 | 自动合并路径实测 | PR #5（actions 分组）的 `mod` / `build-test` 全绿，automerge 首跑卡在 merge 步骤（缺 `contents: write`）；修正后重跑 **已真实合并成功**（`merged_by=github-actions[bot]`，合并提交 `c0366e8e`） |
-| **GITHUB_TOKEN 链式抑制** | 实测：`c0366e8e` 上 **0 个 check run** —— 由 `GITHUB_TOKEN` 合并产生的 master push 不会再触发任何工作流。因此“合并→发布”这一跳改用 `workflow_run`（监听 Automerge Dependabot 完成）；人工用 PAT / 本地合并仍走 push 路径 |
+| **GITHUB_TOKEN 链式抑制** | 实测：`c0366e8e` 上 **0 个 check run** —— 由 `GITHUB_TOKEN` 合并产生的 master push 不会再触发任何工作流。因此“自动合并→发布”这一跳改用 `workflow_run`（监听 Automerge Dependabot 完成）；人工用 PAT / 本地合并仍走 push 路径 |
+| 发布链路（人工合并路径） | 实测：PR #6（`go.mod` 新增 `toolchain go1.27.3`；先探测过 `go list -m -u -json all`，结果为 **0 个依赖有可用更新**，因此不做伪造升降级）已由人工 token squash 合并为 `2aa3871`；首次触发的 Release run 因 job 级 `if` 引用不存在的 `ref_type` 而被整体 skipped，已修 |
 | check_run 不可靠 | **Dependabot PR 上的 `check_run` 事件不会为本仓库工作流创建运行**（只有 master 自身推送的检查会触发），因此自动合并改用 `pull_request` 触发 + 作业内轮询 CI |
 
 > 一键脚本仓库 `TuuzNet/kcptun-script` 已有自己的 `release.yml`（发布 `kcptun.sh` 本身），
@@ -94,7 +95,7 @@ Dependabot PR ──▶ CI(mod/build-test) ──▶ automerge(squash 合并到 
 | `CI` | push master、所有针对 master 的 PR、手动 | 也用于给非 Dependabot 改动把关 |
 | `Automerge Dependabot` | `pull_request`（opened / synchronize / reopened / ready_for_review）且作者为 `dependabot[bot]`；或手动指定 PR 编号 | 作业内最多轮询 `WAIT_MINUTES=20` 分钟等 CI 出结论。只处理目标为 `master`、`mergeable=true`、无 `automerge-skip`/`do-not-merge`/`hold` 标签的 PR；合并后为合并提交补打 `dependencies` / `go` 标签（squash 会丢标签，供 Release 判定来源） |
 | `Dependency Upgrade` | 手动 `workflow_dispatch` | 输入：`mode`（`all`=`go get -u ./...`；`direct`=只升级直接依赖）、`go_directive`（默认 `no`，不动 go 指令行）、`target_branch`（留空自动生成） |
-| `Release` | ① **`workflow_run`：Automerge Dependabot 以 success 结束**（自动合并后的主链路）；② push master 且提交信息含 `Bump` / `chore(deps)` 或作者为 dependabot[bot]（人工 PAT / 本地合并）；③ push tag `v*`；④ 手动（可指定 tag） | 自动路径（①②）额外过内容闸门：`prev_tag..HEAD` 必须改了 `go.mod` / `go.sum` 才发布；手动触发勾选 `dry_run=true` 只构建不发布 |
+| `Release` | ① **`workflow_run`：Automerge Dependabot 以 success 结束**（自动合并后的主链路）；② push master 的任意提交（人工 PAT / 本地合并走这里）；③ push tag `v*`；④ 手动（可指定 tag） | 自动路径（①②）由作业内的**内容闸门**权威判定：`prev_tag..HEAD` 必须改了 `go.mod` / `go.sum` 才发布（不看提交信息关键字）；推 tag 与手动触发属显式意图，不受闸门限制。闸门不通过时不安装 Go、不构建，约 20s 就结束。手动触发勾选 `dry_run=true` 只构建不发布 |
 
 自动合并的**降级策略**（不会静默关闭 PR）：CI 任一必需检查未通过、等待超时、未拿到任何 CI 结论、
 PR 有冲突或 `mergeable` 非 true、被人工打了暂缓标签 → 保留 PR、打 `automerge-skip` 标签并写明原因；
@@ -191,6 +192,7 @@ VERSION=v20261030.1 bash .github/scripts/build-dist.sh
 | `Resource not accessible by integration` / 合并被拒 | ① 工作流缺 `contents: write`（合并会写 master，实测必需）；② 分支保护要求 approval 而未配置可 approve 的账号 | 保持 `contents: write` + `pull-requests: write`；如要求 approval 则配 `AUTOMERGE_TOKEN`，或把 required_approving_review_count 设为 0。合并失败现在会保留 PR、打 `automerge-skip` 并把原始报错贴到 PR 评论 |
 | `gh: pull request is not mergeable` | 与上一条同类，或 squash 被仓库关闭 | `gh repo edit tobycroft/kcptun --enable-squash-merge` |
 | `Release` 没被触发 | 最常见原因：触发它的 push 是由 `GITHUB_TOKEN` 写的（已被合并提交 `c0366e8e` 实测证实）—— 现在靠 `workflow_run` 补救；其次是 automerge 未成功（conclusion 不是 success）或 `go.mod` / `go.sum` 自上一个 tag 以来没变化 | 看 Automerge 运行是否 success；看 `Plan tag` 步骤输出的 `skip_reason`（会写明是 tag 序号、依然无依赖变更、还是 Release 已存在）；实在需要发布就手动触发 `Release` 并指定 tag |
+| `Release` 被 push 触发了，但**整个 run 直接是 skipped**（连 `build` job 都没输出） | job 级 `if` 引用了 payload 里不存在的属性，求值失败被静默跳过，不报任何错。实踩两次：`github.event.ref_type`（**push 事件无此字段**，只有 create/delete 事件有）与 `github.event.head_commit.author.login`（push payload 的 author 只含 `name/email/username`） | 表达式只碰确定存在的字段：tag/分支用 `startsWith(github.ref, 'refs/tags/')` 判，作者用 `author.username`；并在 shell 里用 `case '${{ github.ref }}' in refs/tags/*)` 而非 `'${{ ... }}'` 嵌套单引号。这类静默 skip 只能靠 `actions/runs/<id>` 看 `event` 与 `conclusion` 定位 |
 | 发布只出了一半资产就中断 | tag 已存在但 Release 缺失 | 再次手动触发同一 tag，工作流会走「补齐资产」分支（`gh release upload --clobber`） |
 | `go get -u=patch` 报错 `can't query version "patch" of module ...` | 该写法会把主模块自身纳入查询，主模块无发布版本 | 已避开：`mode=all` 用 `go get -u ./...`，`mode=direct` 只对直接依赖执行 `go get -u` |
 | `setup-go` 找不到 Go 版本 | 三处版本号写死为 `1.27.3` | 升级工具链时同步 `ci.yml`、`release.yml`、`dependency-upgrade.yml` 与 `go.mod` |
