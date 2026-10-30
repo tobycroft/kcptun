@@ -15,8 +15,10 @@ updates:
       timezone: Asia/Shanghai
     # 同时覆盖直接依赖与间接依赖；间接依赖只在被分组收拢时才单独开 PR
     open-pull-requests-limit: 15
-    pull-request-branch-name:
-      separator: '-'
+    # 注：不设置 pull-request-branch-name.separator。
+    # 实测（本仓库 PR #4/#5）：自定义分隔符 '-' 会把 gomod 分支压成
+    # dependabot-go_modules-master-...，与默认的 dependabot/... 不一致，
+    # 使任何依赖 dependabot/ 前缀的逻辑失效。
     commit-message:
       prefix: chore
       prefix-development: chore

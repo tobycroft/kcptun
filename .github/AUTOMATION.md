@@ -17,6 +17,9 @@
 | 既有工作流 | 主干上 `.github/workflows/` 不存在（API 返回 404），因此本流水线是新增，不与既有流程冲突 |
 | 既有标签 | `dependencies`、`go` 标签仓库中已存在，可直接复用；`automerge-skip` 由工作流自动创建 |
 | 仓库状态 | 非 fork、公开、无 open PR/issue（因此新工作流不会与存量运行纠缠） |
+| 已注册工作流 | 推送后 4 个工作流均为 `active`（API `actions/workflows`） |
+| 首轮回环实测 | CI(push master) 全绿；`Release` 与 `Automerge` 正确判定为 skipped；Dependabot 立即跑出 `go_modules` 与 `github_actions` 两个更新作业并开出 PR #4/#5 |
+| check_run 不可靠 | **Dependabot PR 上的 `check_run` 事件不会为本仓库工作流创建运行**（只有 master 自身推送的检查会触发），因此自动合并改用 `pull_request` 触发 + 作业内轮询 CI |
 
 > 一键脚本仓库 `TuuzNet/kcptun-script` 已有自己的 `release.yml`（发布 `kcptun.sh` 本身），
 > 本流水线不涉及、也不修改它。
@@ -29,7 +32,7 @@
 | --- | --- |
 | `.github/dependabot.yml` | 依赖更新入口：`gomod`（每日、分组、标签、提交信息前缀）与 `github-actions`（每周一） |
 | `.github/workflows/ci.yml` | 编译 + 静态检查 + 测试；job 名 `mod` / `build-test` 就是分支保护里的必需状态检查，也是自动合并的放行条件 |
-| `.github/workflows/automerge-dependabot.yml` | CI 全绿后自动 approve 并以 **squash** 合并 Dependabot PR；失败/冲突时保留 PR 并打标签 |
+| `.github/workflows/automerge-dependabot.yml` | `pull_request` 触发（只处理 `dependabot[bot]` 开的 PR），作业内轮询等待 `mod` / `build-test` 出结论；全绿且无冲突则自动 approve + **squash** 合并，否则保留 PR 并打标签写原因；支持 `workflow_dispatch` 按 PR 编号补跑 |
 | `.github/workflows/dependency-upgrade.yml` | 手动（`workflow_dispatch`）一次性升级到最新：`go get -u ./...` + `go mod tidy` + 校验 + 开 PR |
 | `.github/workflows/release.yml` | 依赖合并到主干后自动打 tag、构建 21 个产物、生成校验和与说明、创建 GitHub Release；支持 `dry_run` 预演 |
 | `.github/scripts/build-dist.sh` | 多平台构建与 `checksums.txt` 生成（本地可执行同一脚本做核对） |
@@ -86,12 +89,12 @@ Dependabot PR ──▶ CI(mod/build-test) ──▶ automerge(squash 合并到 
 | --- | --- | --- |
 | Dependabot | `gomod` 每日 08:00（Asia/Shanghai）、`github-actions` 每周一 | `target-branch: master`；分组：`go-kcp-core`（`github.com/xtaci/*`）、`go-all-minor-patch`（其余 minor/patch）；major 不分组，逐个 PR 由人工确认 |
 | `CI` | push master、所有针对 master 的 PR、手动 | 也用于给非 Dependabot 改动把关 |
-| `Automerge Dependabot` | CI 的 `mod` / `build-test` 在 `dependabot/*` 分支上 completed | 只处理 `dependabot[bot]` 提交、目标为 `master`、`mergeable=true`、无 `automerge-skip`/`do-not-merge`/`hold` 标签的 PR；合并后为合并提交补打 `dependencies` / `go` 标签（squash 会丢标签，供 Release 判定来源） |
+| `Automerge Dependabot` | `pull_request`（opened / synchronize / reopened / ready_for_review）且作者为 `dependabot[bot]`；或手动指定 PR 编号 | 作业内最多轮询 `WAIT_MINUTES=20` 分钟等 CI 出结论。只处理目标为 `master`、`mergeable=true`、无 `automerge-skip`/`do-not-merge`/`hold` 标签的 PR；合并后为合并提交补打 `dependencies` / `go` 标签（squash 会丢标签，供 Release 判定来源） |
 | `Dependency Upgrade` | 手动 `workflow_dispatch` | 输入：`mode`（`all`=`go get -u ./...`；`direct`=只升级直接依赖）、`go_directive`（默认 `no`，不动 go 指令行）、`target_branch`（留空自动生成） |
 | `Release` | ① push tag `v*`；② push master 且提交来自 `dependabot[bot]` 或信息含 `Bump` / `chore(deps)`；③ 手动（可指定 tag） | 手动触发时 `dry_run=true` 只构建不发布 |
 
-自动合并的**降级策略**（不会静默关闭 PR）：CI 任一必需检查失败、检查缺失、PR 有冲突或
-`mergeable` 非 true、被人工打了暂缓标签 → 保留 PR、打 `automerge-skip` 标签并写明原因；
+自动合并的**降级策略**（不会静默关闭 PR）：CI 任一必需检查未通过、等待超时、未拿到任何 CI 结论、
+PR 有冲突或 `mergeable` 非 true、被人工打了暂缓标签 → 保留 PR、打 `automerge-skip` 标签并写明原因；
 PR 已关闭/合并则直接跳过不做任何操作。
 
 ---
@@ -138,9 +141,15 @@ VERSION=v20261030.1 bash .github/scripts/build-dist.sh
    检查点：日志出现 `go get -u` / `go mod tidy` / 校验各段；
    若已有最新则「无变化，未创建 PR」；有变化则生成一个带 `dependencies` / `go` 标签的 PR，
    PR 描述里有依赖版本变化表与 commit 范围。
-5. **自动合并演练**：等 Dependabot 开出第一个 PR（或手动改一个依赖版本触发）。
-   检查点：PR 上出现 `mod` / `build-test` 两个检查 → 全绿后自动 approve + squash 合并 →
-   合并提交带有 `dependencies` / `go` 标签 → `Release` 被 master 推送触发并发布新版本。
+5. **自动合并演练**：`pull_request` 事件触发（opened / synchronize）。
+   注意：**工作流文件取自 PR 的头分支**，因此已存在的 Dependabot 分支若是在修正前建的，
+   需等 Dependabot 下一次每日检查 rebase，或在 PR 下发 `@dependabot recreate` 重生成分支，
+   新版的 automerge 工作流才会生效。
+   检查点：PR 上出现 `mod` / `build-test` 两个检查 → 全绿后 `automerge` 作业轮询到结论并自动 approve + squash 合并 →
+   合并提交带 `dependencies` / `go` 标签 → `Release` 被 master 推送触发并发布新版本。
+   反面样本（实测）：PR #4 把 `github.com/xtaci/smux` 从 1.5.58 升到 **2.0.1+incompatible**（major），
+   编译报 `smuxConfig.Version undefined (type *smux.Config has no field or method Version)`，
+   CI 红 → 不会被自动合并，应当看到 `automerge-skip` 标签与原因评论（这正是预期行为：major 不分组、需人工确认）。
 6. **人工兜底**：合并后如产物有问题，可用 `Release` 手动触发并填指定 tag 重新发布；
    tag 与 Release 已存在时工作流会跳过而不是重复创建。
 
@@ -151,9 +160,10 @@ VERSION=v20261030.1 bash .github/scripts/build-dist.sh
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | Dependabot 报 `Your .github/dependabot.yml contained invalid details`（check-run 名为 `.github/dependabot.yml`，conclusion=failure） | `groups.<name>.update-types` 写成了 `version-update:semver-minor` 这种长写法 | 分组下的 `update-types` 只接受 `major` / `minor` / `patch`；长写法仅在更新项顶层的 `update-types` 合法。本仓库已修正；此类错误可在 `https://api.github.com/repos/<owner>/<repo>/check-runs/<id>` 的 `output.summary` 里看到具体字段路径 |
-| Dependabot 一直不开 PR | 配置不在默认分支；或 PR 数已达 `open-pull-requests-limit` | 确认 `.github/dependabot.yml` 已在 `master`；`Dependabot → Security updates` 里看配额 |
+| Dependabot 一直不开 PR | 配置不在默认分支；配置校验失败；或 PR 数已达 `open-pull-requests-limit` | 确认 `.github/dependabot.yml` 已在 `master` 且校验通过；`Settings → Dependabot → Version updates` 看队列与配额 |
+| Dependabot 分支名变成 `dependabot-xxx`（没有 `dependabot/` 前缀） | `pull-request-branch-name.separator` 被设成 `-` | 已移除该配置（实测会使 gomod 分支被压平，前缀判定失效） |
 | PR 里只升级了一半依赖 | 分组规则：`github.com/xtaci/*` 单独成组，major 不分组 | 属预期；major 升级需人工确认后合并 |
-| `Automerge` 没跑 | 触发只看 `mod` / `build-test` 在 `dependabot/*` 分支完成；CI 未跑或非这两个 job | 看 PR 的 Checks 列表，确认 job 名仍是 `mod` / `build-test`（改名需同步 `REQUIRED_CHECKS`） |
+| `Automerge` 没跑 | ① 触发已改为 `pull_request`（`check_run` 在 Dependabot PR 上不会创建运行）；② PR 头分支里仍旧着旧版工作流文件 | 确认 PR 作者为 `dependabot[bot]`；必要时 `@dependabot recreate` 重生成分支；或用 `workflow_dispatch` 填入 PR 编号补跑 |
 | `不自动合并：必需检查 mod 未通过（结论：failure）` | CI 真的失败 | 按 `automerge-skip` 标签与 PR 评论修代码/回滚该依赖 |
 | `PR 当前不可合并（mergeable=false）` | 与主干冲突 | 在 PR 上点 “Update branch” 或本地 rebase 后重推，CI 重新全绿会自动合并 |
 | `Resource not accessible by integration` / 合并被拒 | 分支保护要求 approval，而未配置可 approve 的账号 | 设置 `AUTOMERGE_TOKEN`（另一账号的 PAT），或把 required_approving_review_count 设为 0 |
