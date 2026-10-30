@@ -9,6 +9,11 @@
 #   - 降级策略：CI 失败 / 等待超时 / 存在冲突 / 人工暂缓标签 → 保留 PR + 打 automerge-skip
 #     标签 + 写明原因，绝不静默关闭，也绝不合并。
 #
+#   - 跨步骤的判定结果（resolved / decision / merged / merge_attempt_failed）一律走
+#     `steps.<id>.outputs.*`：`env` 上下文只认工作流文件里显式声明的 env，运行中写入
+#     $GITHUB_ENV 的变量在 `if:` 里引用属未定义行为，IDE 也会报
+#     "Context access might be invalid"；供 shell 使用的变量仍走 $GITHUB_ENV。
+#
 # 所需仓库设置见 .github/AUTOMATION.md（分支保护必需状态检查、可选 secret）。
 name: Automerge Dependabot
 
@@ -55,6 +60,7 @@ jobs:
       WAIT_MINUTES: 20
     steps:
       - name: Resolve pull request
+        id: resolve
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_PR: ${{ github.event.inputs.pr_number }}
@@ -75,10 +81,12 @@ jobs:
           author="$(jq -r '.user.login' <<<"${pr_json}")"
           if [ "${author}" != "dependabot[bot]" ]; then
             echo "PR #${pr_number} 的提交者是 ${author}，不是 dependabot[bot]，不处理"
-            echo "resolved=false" >> "${GITHUB_ENV}"
+            echo "resolved 输出为 false：后续步骤全部跳过"
+            echo "resolved=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
+          # put：仅供后续步骤的 shell 脚本消费（运行器环境变量），不参与 if: 表达式
           # 多行/特殊字符值统一用 GITHUB_ENV 的分隔写法，避免二次解析
           put() {
             {
@@ -88,9 +96,19 @@ jobs:
             } >> "${GITHUB_ENV}"
           }
 
-          put pr_number "${pr_number}"
+          # out：控制流判定结果必须走 steps.*.outputs，if: env.<运行中写入的变量> 不可靠
+          out() {
+            {
+              echo "$1<<__EOF__"
+              echo "$2"
+              echo __EOF__
+            } >> "${GITHUB_OUTPUT}"
+          }
+
+          out resolved "true"
+          out pr_number "${pr_number}"
+          out pr_title "$(jq -r '.title' <<<"${pr_json}")"
           put author "${author}"
-          put pr_title "$(jq -r '.title' <<<"${pr_json}")"
           put labels "$(jq -r '[.labels[].name] | join(" ")' <<<"${pr_json}")"
           put mergeable "$(jq -r '.mergeable' <<<"${pr_json}")"
           put mergeable_state "$(jq -r '.mergeable_state' <<<"${pr_json}")"
@@ -98,10 +116,10 @@ jobs:
           put pr_state "$(jq -r '.state' <<<"${pr_json}")"
           put pr_url "$(jq -r '.html_url' <<<"${pr_json}")"
           put head_sha "$(jq -r '.head.sha' <<<"${pr_json}")"
-          put resolved "true"
 
       - name: Wait for CI (mod / build-test)
-        if: env.resolved == 'true'
+        id: wait
+        if: steps.resolve.outputs.resolved == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -111,6 +129,15 @@ jobs:
             jq -r --arg n "$1" \
               '[.[] | select(.name == $n)] | if length == 0 then "PENDING" else (sort_by(.id) | last | .conclusion // "null") end' \
               <<<"${checks}"
+          }
+
+          # 多行值用分隔写法写进 GITHUB_OUTPUT，供后续步骤 if: 与脚本使用
+          out() {
+            {
+              echo "$1<<__EOF__"
+              echo "$2"
+              echo __EOF__
+            } >> "${GITHUB_OUTPUT}"
           }
 
           deadline=$((SECONDS + WAIT_MINUTES * 60))
@@ -140,38 +167,41 @@ jobs:
             sleep 20
           done
 
-          {
-            echo 'ci_results<<__EOF__'
-            echo "${ci_results}"
-            echo __EOF__
-          } >> "${GITHUB_ENV}"
-          echo "ci_timeout=${ci_timeout}" >> "${GITHUB_ENV}"
+          out ci_results "${ci_results}"
+          out ci_timeout "${ci_timeout}"
 
       - name: Evaluate gates (CI result / conflicts / labels)
-        if: env.resolved == 'true'
+        id: gates
+        if: steps.resolve.outputs.resolved == 'true'
+        env:
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          # Wait 步骤把结论写进了 steps.wait.outputs，这里必须映射成环境变量供本步骤脚本读，
+          # 否则 set -u 下未绑定变量会使步骤直接失败
+          CI_RESULTS: ${{ steps.wait.outputs.ci_results }}
+          CI_TIMEOUT: ${{ steps.wait.outputs.ci_timeout }}
         run: |
           set -euo pipefail
 
           skip() {
-            echo "decision=skip" >> "${GITHUB_ENV}"
+            echo "decision=skip" >> "${GITHUB_OUTPUT}"
             {
               echo 'reason<<__EOF__'
               echo "$1"
               echo __EOF__
-            } >> "${GITHUB_ENV}"
+            } >> "${GITHUB_OUTPUT}"
             echo "::notice::不自动合并：$1"
             exit 0
           }
 
           # 0) PR 已关闭/已合并：静默退出，不做任何评论与标签
           if [ "${pr_state}" != "open" ]; then
-            echo "PR #${pr_number} 当前状态为 ${pr_state}，无需处理"
+            echo "PR #${PR_NUMBER} 当前状态为 ${pr_state}，无需处理"
             exit 0
           fi
 
           # 1) 只处理主干分支上的依赖 PR
           if [ "${pr_base}" != "master" ]; then
-            skip "PR #${pr_number} 的目标分支是 ${pr_base}，不是主干 master"
+            skip "PR #${PR_NUMBER} 的目标分支是 ${pr_base}，不是主干 master"
           fi
 
           # 2) 人工喊停：带上跳过标签就不再自动处理
@@ -182,13 +212,15 @@ jobs:
           esac
 
           # 3) CI 结论：必需检查必须全部 success
-          if [ -z "${ci_results}" ]; then
+          if [ -z "${CI_RESULTS}" ]; then
             skip "未取得任何 CI 结论（ci_results 为空），不做合并"
           fi
-          if [ "${ci_timeout}" = "true" ]; then
-            skip "等待 CI 结论超时（${WAIT_MINUTES} 分钟），当前状态：${ci_results}"
+          if [ "${CI_TIMEOUT}" = "true" ]; then
+            skip "等待 CI 结论超时（${WAIT_MINUTES} 分钟），当前状态：${CI_RESULTS}"
           fi
-          for pair in ${ci_results}; do
+          # 不加引号：需要按空白拆成多个 name=conclusion 对
+          # shellcheck disable=SC2086
+          for pair in ${CI_RESULTS}; do
             name="${pair%%=*}"
             conclusion="${pair#*=}"
             if [ "${conclusion}" != "success" ]; then
@@ -200,8 +232,8 @@ jobs:
           attempt=0
           while [ "${mergeable}" != "true" ] && [ "${attempt}" -lt 6 ]; do
             attempt=$((attempt + 1))
-            mergeable_now="$(gh api "repos/${{ github.repository }}/pulls/${pr_number}" --jq '.mergeable')"
-            mergeable_state="$(gh api "repos/${{ github.repository }}/pulls/${pr_number}" --jq '.mergeable_state')"
+            mergeable_now="$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}" --jq '.mergeable')"
+            mergeable_state="$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}" --jq '.mergeable_state')"
             mergeable="${mergeable_now}"
             if [ "${mergeable}" = "null" ] || [ -z "${mergeable}" ]; then
               sleep 5
@@ -211,11 +243,11 @@ jobs:
             skip "PR 当前不可合并（mergeable=${mergeable}, state=${mergeable_state}），可能存在冲突"
           fi
 
-          echo "decision=merge" >> "${GITHUB_ENV}"
-          echo "CI 结论全部通过：${ci_results}"
+          echo "decision=merge" >> "${GITHUB_OUTPUT}"
+          echo "CI 结论全部通过：${CI_RESULTS}"
 
       - name: Ensure labels exist
-        if: env.resolved == 'true'
+        if: steps.resolve.outputs.resolved == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -234,35 +266,40 @@ jobs:
           create_label 'go' '16e2e2' 'Pull requests that update go code'
 
       - name: Approve pull request
-        if: env.decision == 'merge'
+        if: steps.gates.outputs.decision == 'merge'
         env:
-          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          # 可选 secret：未配置时展开为空串，脚本内已按“跳过 approve”处理
+          AUTOMERGE_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
         run: |
           set -euo pipefail
           # 优先用独立账号 / PAT 完成 approve（分支保护要求 approval 时必须有；
           # GITHUB_TOKEN 无法 approve 自己触发的 PR，属已知平台限制）。
           # 未配置 AUTOMERGE_TOKEN 时跳过 approve：分支保护未强制 approval 也能正常合并。
-          if [ -z "${GH_TOKEN}" ]; then
+          if [ -z "${AUTOMERGE_TOKEN}" ]; then
             echo "未配置 secrets.AUTOMERGE_TOKEN，跳过显式 approve（如分支保护要求 approval，请配置该 secret）"
             exit 0
           fi
-          gh pr review "${pr_number}" --repo "${{ github.repository }}" --approve \
+          gh pr review "${PR_NUMBER}" --repo "${{ github.repository }}" --approve \
             --body '自动检查通过（CI: mod / build-test 全绿，无冲突），自动批准合并。'
 
       - name: Merge with squash
-        if: env.decision == 'merge'
+        id: merge
+        if: steps.gates.outputs.decision == 'merge'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          PR_TITLE: ${{ steps.resolve.outputs.pr_title }}
         run: |
           set -euo pipefail
           # 合并失败（常见为凭据权限不足或平台临时拒接）时不直接红叉了事：
           # 转入降级分支，保留 PR + 打 automerge-skip 标签 + 把原始报错写到 PR 评论，
           # 同时由最后一步把 job 标为失败。
-          merge_out="$(gh pr merge "${pr_number}" --repo "${{ github.repository }}" \
+          merge_out="$(gh pr merge "${PR_NUMBER}" --repo "${{ github.repository }}" \
             --squash --delete-branch \
-            --subject "chore(deps): ${pr_title} (#${pr_number})" 2>&1)" || {
+            --subject "chore(deps): ${PR_TITLE} (#${PR_NUMBER})" 2>&1)" || {
             echo "${merge_out}"
-            echo "decision=skip" >> "${GITHUB_ENV}"
+            echo "decision=skip" >> "${GITHUB_OUTPUT}"
             {
               echo 'reason<<__EOF__'
               echo "调用 merge 失败（HTTP/权限类错误），保留 PR 供人工处理："
@@ -271,20 +308,21 @@ jobs:
               printf '%s\n' "${merge_out}"
               echo '```'
               echo __EOF__
-            } >> "${GITHUB_ENV}"
-            echo "merge_attempt_failed=true" >> "${GITHUB_ENV}"
+            } >> "${GITHUB_OUTPUT}"
+            echo "merge_attempt_failed=true" >> "${GITHUB_OUTPUT}"
             exit 0
           }
-          echo "merged=true" >> "${GITHUB_ENV}"
+          echo "merged=true" >> "${GITHUB_OUTPUT}"
 
       - name: Restore labels after squash merge
-        if: env.merged == 'true'
+        if: steps.merge.outputs.merged == 'true'
         env:
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # squash 合并会丢弃 PR 标签，这里补回，供 Release 判定依赖升级来源
-          merge_sha="$(gh api "repos/${{ github.repository }}/pulls/${pr_number}" --jq '.merge_commit_sha')"
+          merge_sha="$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}" --jq '.merge_commit_sha')"
           curl -sS -o /dev/null -X PUT \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H 'Accept: application/vnd.github+json' \
@@ -292,41 +330,53 @@ jobs:
             -d '{"labels":["dependencies","go"]}'
           echo "已为合并提交 ${merge_sha} 补打 dependencies / go 标签"
 
+      # decision / reason 可能来自 gates（判定跳过）或 merge（合并调用失败）；
+      # 未执行的步骤其 outputs 求值为空串，因此用三元取有值的一侧。
       - name: Report skip (keep PR open)
-        if: always() && env.decision == 'skip'
+        if: always() && (steps.gates.outputs.decision == 'skip' || steps.merge.outputs.decision == 'skip')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          REASON: ${{ steps.gates.outputs.decision == 'skip' && steps.gates.outputs.reason || steps.merge.outputs.reason }}
         run: |
           set -euo pipefail
-          echo "保留 PR #${pr_number} 不做自动合并：${reason}"
-          gh pr edit "${pr_number}" --repo "${{ github.repository }}" --add-label "${SKIP_LABEL}" || true
+          echo "保留 PR #${PR_NUMBER} 不做自动合并：${REASON}"
+          gh pr edit "${PR_NUMBER}" --repo "${{ github.repository }}" --add-label "${SKIP_LABEL}" || true
           body="### 自动合并已跳过
 
           本 PR 保持打开，等待人工处理。原因：
 
-          > ${reason}
+          > ${REASON}
 
           排查建议见 [.github/AUTOMATION.md](https://github.com/${{ github.repository }}/blob/master/.github/AUTOMATION.md)。
           处理完成后移除 \`automerge-skip\` 标签，再用本工作流手动补跑（填 PR 编号）或推送新提交重新触发。"
-          gh pr comment "${pr_number}" --repo "${{ github.repository }}" --body-file - <<<"${body}"
+          gh pr comment "${PR_NUMBER}" --repo "${{ github.repository }}" --body-file - <<<"${body}"
 
       - name: Summary
         if: always()
+        env:
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          PR_TITLE: ${{ steps.resolve.outputs.pr_title }}
+          DECISION: ${{ steps.gates.outputs.decision }}
+          CI_RESULTS: ${{ steps.wait.outputs.ci_results }}
+          REASON: ${{ steps.gates.outputs.reason != '' && steps.gates.outputs.reason || steps.merge.outputs.reason }}
         run: |
           set -euo pipefail
           {
             echo '### Automerge 评估结果'
             echo ''
-            echo "- PR：#${pr_number:-未识别} ${{ env.pr_title }}"
-            echo "- 决定：${decision:-未处理（非 Dependabot PR 或无关联 PR）}"
-            echo "- CI 结论：${ci_results:-无}"
-            echo "- 跳过原因：${reason:-无}"
+            echo "- PR：#${PR_NUMBER:-未识别} ${PR_TITLE:-未识别}"
+            echo "- 决定：${DECISION:-未处理（非 Dependabot PR 或无关联 PR）}"
+            echo "- CI 结论：${CI_RESULTS:-无}"
+            echo "- 跳过原因：${REASON:-无}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
       # 降级处理完成后才把 job 标为失败，便于在 Actions 列表里直接看出问题
       - name: Fail job when merge attempt errored
-        if: env.merge_attempt_failed == 'true'
+        if: steps.merge.outputs.merge_attempt_failed == 'true'
+        env:
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
         run: |
           set -euo pipefail
-          echo "::error::自动合并调用失败，已在 PR #${pr_number} 上留下原因评论，详情见上一步日志"
+          echo "::error::自动合并调用失败，已在 PR #${PR_NUMBER} 上留下原因评论，详情见上一步日志"
           exit 1

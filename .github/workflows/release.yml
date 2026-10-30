@@ -7,9 +7,9 @@
 #      （注：push 事件 payload 没有 ref_type 字段，是否 tag push 一律用 github.ref 前缀判断）
 #   2. push: master 且提交信息含 chore(deps) / Bump —— 人工用 PAT / 本地合并依赖升级时的自动发布
 #      （注：不要在 job 级 if 里访问 push payload 中不存在的属性，例如
-#       head_commit.author.login —— push 事件的 author 只有 name/email/username；
-#       引用不存在的属性会让条件求值失败并把整个 run 静默标为 skipped。
-#       权威判定交给作业内的内容闸门，不依赖提交信息启发式）
+#       head_commit.author.login —— push 事件的 author 只有 name/email/username（用 username）；
+#       引用不存在的属性会让条件求值失败并把整个 run 静默标为 skipped（无报错提示）。
+#       因此这里只保留确定存在的字段，权威判定交给作业内的内容闸门）
 #   3. push: tags 'v*'            —— 手工推 tag 时按 tag 发布
 #   4. workflow_dispatch          —— 手动发布，或 dry_run 预演（只构建不发布）
 #
@@ -56,16 +56,15 @@ jobs:
     name: build
     runs-on: ubuntu-latest
     if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+      (github.event_name == 'push' &&
+       (contains(github.event.head_commit.message, 'chore(deps)') ||
+        contains(github.event.head_commit.message, 'Bump') ||
+        github.event.head_commit.author.username == 'dependabot[bot]')) ||
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch != 'master') ||
-      (github.event_name != 'push' && github.event_name != 'workflow_run') ||
-      (github.event_name == 'push' &&
-       (startsWith(github.ref, 'refs/tags/') ||
-        (startsWith(github.ref, 'refs/heads/') &&
-         (github.event.head_commit.author.login == 'dependabot[bot]' ||
-          contains(github.event.head_commit.message, 'Bump') ||
-          contains(github.event.head_commit.message, 'chore(deps)')))))
+       github.event.workflow_run.head_branch != 'master')
     outputs:
       tag: ${{ steps.plan.outputs.tag }}
       prev_tag: ${{ steps.plan.outputs.prev_tag }}
@@ -100,6 +99,14 @@ jobs:
           reason=''
           existing_tags="$(git tag --list 'v*' | sort)"
 
+          # 是否推的是 tag：只看 github.ref 前缀（push payload 没有 ref_type 字段），
+          # 在 shell 里用 case 语句判定，避开在单引号内做表达式插值的写法
+          # （注：workflow 内所有双花括号插值都会被当作表达式解析，注释里也不能写占位形式）
+          is_tag_push=false
+          case '${{ github.ref }}' in
+            refs/tags/*) is_tag_push=true ;;
+          esac
+
           # 纯 bash 判存在，不用 `printf | grep -q`：pipefail 下 grep 提前退出会使
           # 上游 printf 收到 SIGPIPE，导致「已存在的 tag」被误判为不存在而重复用 tag
           tag_exists() {
@@ -114,7 +121,7 @@ jobs:
 
           if [ "${{ github.event_name }}" = 'workflow_dispatch' ] && [ -n "${INPUT_TAG}" ]; then
             tag="${INPUT_TAG}"
-          elif [ '${{ startsWith(github.ref, 'refs/tags/') }}' = 'true' ]; then
+          elif [ "${is_tag_push}" = 'true' ]; then
             tag='${{ github.ref_name }}'
           else
             # 与现有 tag 风格一致：日期版本 + 同日多次发布时追加 .N
@@ -159,7 +166,7 @@ jobs:
           # 内容闸门：自动路径必须真的有 go.mod / go.sum 变更（推 tag 与手动触发属显式意图，不受限）
           if [ -z "${skip}" ]; then
             if [ '${{ github.event_name }}' = 'workflow_run' ] ||
-               { [ '${{ github.event_name }}' = 'push' ] && [ '${{ startsWith(github.ref, 'refs/tags/') }}' != 'true' ]; }; then
+               { [ '${{ github.event_name }}' = 'push' ] && [ "${is_tag_push}" != 'true' ]; }; then
               if [ -z "${prev_tag}" ]; then
                 skip='true'
                 reason='仓库没有可对比的上一个 tag，自动路径不做猜测式发布；请手动触发并指定 tag'
