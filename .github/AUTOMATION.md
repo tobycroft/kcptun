@@ -21,7 +21,7 @@
 | 首轮回环实测 | CI(push master) 全绿；`Release` 与 `Automerge` 正确判定为 skipped；Dependabot 立即跑出 `go_modules` 与 `github_actions` 两个更新作业并开出 PR #4/#5 |
 | 自动合并路径实测 | PR #5（actions 分组）的 `mod` / `build-test` 全绿，automerge 首跑卡在 merge 步骤（缺 `contents: write`）；修正后重跑 **已真实合并成功**（`merged_by=github-actions[bot]`，合并提交 `c0366e8e`） |
 | **GITHUB_TOKEN 链式抑制** | 实测：`c0366e8e` 上 **0 个 check run** —— 由 `GITHUB_TOKEN` 合并产生的 master push 不会再触发任何工作流。因此“自动合并→发布”这一跳改用 `workflow_run`（监听 Automerge Dependabot 完成）；人工用 PAT / 本地合并仍走 push 路径 |
-| 发布链路（人工合并路径） | 待验证：PR #6（`go.mod` 新增 `toolchain go1.27.3`，因为实测 `go list -m -u -json all` 显示 **0 个依赖有可用更新**，无法伪装修改）合并后应产生 `v20261030.2` 真实发布 |
+| 发布链路（人工合并路径） | 实测：PR #6（`go.mod` 新增 `toolchain go1.27.3`；先探测过 `go list -m -u -json all`，结果为 **0 个依赖有可用更新**，因此不做伪造升降级）已由人工 token squash 合并为 `2aa3871`；首次触发的 Release run 因 job 级 `if` 引用不存在的 `ref_type` 而被整体 skipped，已修 |
 | check_run 不可靠 | **Dependabot PR 上的 `check_run` 事件不会为本仓库工作流创建运行**（只有 master 自身推送的检查会触发），因此自动合并改用 `pull_request` 触发 + 作业内轮询 CI |
 
 > 一键脚本仓库 `TuuzNet/kcptun-script` 已有自己的 `release.yml`（发布 `kcptun.sh` 本身），
@@ -95,7 +95,7 @@ Dependabot PR ──▶ CI(mod/build-test) ──▶ automerge(squash 合并到 
 | `CI` | push master、所有针对 master 的 PR、手动 | 也用于给非 Dependabot 改动把关 |
 | `Automerge Dependabot` | `pull_request`（opened / synchronize / reopened / ready_for_review）且作者为 `dependabot[bot]`；或手动指定 PR 编号 | 作业内最多轮询 `WAIT_MINUTES=20` 分钟等 CI 出结论。只处理目标为 `master`、`mergeable=true`、无 `automerge-skip`/`do-not-merge`/`hold` 标签的 PR；合并后为合并提交补打 `dependencies` / `go` 标签（squash 会丢标签，供 Release 判定来源） |
 | `Dependency Upgrade` | 手动 `workflow_dispatch` | 输入：`mode`（`all`=`go get -u ./...`；`direct`=只升级直接依赖）、`go_directive`（默认 `no`，不动 go 指令行）、`target_branch`（留空自动生成） |
-| `Release` | ① **`workflow_run`：Automerge Dependabot 以 success 结束**（自动合并后的主链路）；② push master 且提交信息含 `Bump` / `chore(deps)` 或作者为 dependabot[bot]（人工 PAT / 本地合并）；③ push tag `v*`；④ 手动（可指定 tag） | 自动路径（①②）额外过内容闸门：`prev_tag..HEAD` 必须改了 `go.mod` / `go.sum` 才发布；手动触发勾选 `dry_run=true` 只构建不发布 |
+| `Release` | ① **`workflow_run`：Automerge Dependabot 以 success 结束**（自动合并后的主链路）；② push master 的任意提交（人工 PAT / 本地合并走这里）；③ push tag `v*`；④ 手动（可指定 tag） | 自动路径（①②）由作业内的**内容闸门**权威判定：`prev_tag..HEAD` 必须改了 `go.mod` / `go.sum` 才发布（不看提交信息关键字）；推 tag 与手动触发属显式意图，不受闸门限制。闸门不通过时不安装 Go、不构建，约 20s 就结束。手动触发勾选 `dry_run=true` 只构建不发布 |
 
 自动合并的**降级策略**（不会静默关闭 PR）：CI 任一必需检查未通过、等待超时、未拿到任何 CI 结论、
 PR 有冲突或 `mergeable` 非 true、被人工打了暂缓标签 → 保留 PR、打 `automerge-skip` 标签并写明原因；

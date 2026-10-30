@@ -3,13 +3,14 @@
 # 触发条件：
 #   1. workflow_run: Automerge Dependabot 完成且成功 —— 自动合并后的主链路。
 #      为何需要它：实测（合并提交 c0366e8e）GITHUB_TOKEN 合并产生的 push 不会
-#      再触发任何工作流（GitHub 防循环抑制），所以上一个 tag 之后的依赖变更靠 workflow_run 驱动。
-#      （注：push 事件 payload 没有 ref_type 字段，是否 tag push 一律用 github.ref 前缀判断）
-#   2. push: master 且提交信息含 chore(deps) / Bump —— 人工用 PAT / 本地合并依赖升级时的自动发布
-#      （注：不要在 job 级 if 里访问 push payload 中不存在的属性，例如
-#       head_commit.author.login —— push 事件的 author 只有 name/email/username（用 username）；
-#       引用不存在的属性会让条件求值失败并把整个 run 静默标为 skipped（无报错提示）。
-#       因此这里只保留确定存在的字段，权威判定交给作业内的内容闸门）
+#      再触发任何工作流（GitHub 防循环抑制），所以自动合并后的发布靠 workflow_run 驱动。
+#   2. push: master 任意提交 —— 人工用 PAT / 本地合并后的自动发布入口。
+#      不在 job 级 if 里做提交信息启发式判断：依赖是否真的变了，由作业内的
+#      内容闸门比较 prev_tag..HEAD 的 go.mod / go.sum 作权威判定（避免靠关键字、
+#      也避免为了触发发布而写误导性提交标题）。
+#      （注：不要在 job 级 if 里访问 payload 中不存在的属性，例如 push 事件的
+#       head_commit.author.login（只有 name/email/username）与 ref_type（仅 create/delete 有）；
+#       引用不存在的属性会让条件求值失败，整个 run 被静默标为 skipped且无任何报错）
 #   3. push: tags 'v*'            —— 手工推 tag 时按 tag 发布
 #   4. workflow_dispatch          —— 手动发布，或 dry_run 预演（只构建不发布）
 #
@@ -56,14 +57,8 @@ jobs:
     name: build
     runs-on: ubuntu-latest
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
-      (github.event_name == 'push' &&
-       (contains(github.event.head_commit.message, 'chore(deps)') ||
-        contains(github.event.head_commit.message, 'Bump') ||
-        github.event.head_commit.author.username == 'dependabot[bot]')) ||
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch != 'master')
     outputs:
       tag: ${{ steps.plan.outputs.tag }}
@@ -79,14 +74,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Setup Go
-        uses: actions/setup-go@v7
-        with:
-          # 与既有 Release 的构建工具链保持一致（v20261030.1 使用 Go 1.27.3）。
-          # 升级 go 指令行时请同步这里与 ci.yml。
-          go-version: '1.27.3'
-          check-latest: false
-
+      # 先算 tag 与闸门，不通过就不安装 Go，省 runner 时间
       # 规划目标 tag：优先 workflow_dispatch 输入 > tag push > 沿用既有 vYYYYMMDD[.N] 规则
       - name: Plan tag
         id: plan
@@ -188,6 +176,15 @@ jobs:
           echo "skip=${skip}" >> "${GITHUB_OUTPUT}"
           echo "skip_reason=${reason}" >> "${GITHUB_OUTPUT}"
           echo "目标 tag：${tag}（上一个 tag：${prev_tag:-无}）"
+
+      - name: Setup Go
+        if: steps.plan.outputs.skip != 'true'
+        uses: actions/setup-go@v7
+        with:
+          # 与既有 Release 的构建工具链保持一致（v20261030.1 使用 Go 1.27.3），
+          # 并与 go.mod 新增的 toolchain 声明对齐。
+          go-version: '1.27.3'
+          check-latest: false
 
       - name: Build all platforms
         if: steps.plan.outputs.skip != 'true'
