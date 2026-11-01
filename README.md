@@ -181,6 +181,7 @@ systemctl daemon-reload && systemctl enable --now kcptun
   "smuxver": 2,
   "keepalive": 10,
   "keepalivetolerance": 2,
+  "logsize": 1024,
   "closewait": 0,
   "snmplog": "",
   "snmpperiod": 60,
@@ -193,6 +194,7 @@ systemctl daemon-reload && systemctl enable --now kcptun
 - 两端必须一致的参数：`key`、`crypt`、`datashard`、`parityshard`、`mode`（manual 模式下为 `nodelay/interval/resend/nc`）
 - 窗口镜像：客户端 `sndwnd` = 服务端 `rcvwnd`，客户端 `rcvwnd` = 服务端 `sndwnd`
 - 上面的 `autoexpire: 300` + `autoexpiremax: 360` 表示每 300~360 秒（随机）更换一次端口；不需要轮换时把两者都设为 `0` 即可固定端口
+- `logsize: 1024` 表示客户端运行日志最多 1 MB（单位 KB），写满后丢掉最旧的整行、保留最近内容，顺序不变、`cat`/`tail` 直接可读；`snmplog` 不受该参数限制，服务端也没有该参数
 - `autoexpire: -1` 是全自动模式：永不按时间换端口，只有确认某个端口被堵塞时才一次性切换全部端口。判定条件是「连续 `keepalive × keepalivetolerance` 秒收不到对端任何数据」且「OOB 存活探测也无应答」，探测用来区分「链路被堵」和「只是空闲」，空闲但活着的连接不会被拆。该模式下 `autoexpiremax` 与 `scavengettl` 不参与工作，且要求服务端为同版本（探测应答需要 FEC，`datashard`/`parityshard` 需大于 0）
 
 </details>
@@ -242,6 +244,7 @@ systemctl daemon-reload && systemctl enable --now kcptun
 | `autoexpiremax` | int | `0` | 轮换周期的随机上限（秒），0 表示不随机；需大于 `autoexpire`，`-1` 模式下不生效 |
 | `scavengettl` | int | `0` | 旧连接强制回收时限（秒），0 表示永不强制关闭（推荐），`-1` 模式下不生效 |
 | `keepalivetolerance` | int | `2` | 判定端口堵塞可容忍的连续未应答心跳数，仅 `autoexpire: -1` 时生效；`keepalive × keepalivetolerance` 必须小于 smux 内置的 30 秒会话超时 |
+| `logsize` | int | `0` | 运行日志文件的大小上限（KB），写满后丢弃最旧的整行、只保留最近的内容；`0` 表示不限长度（旧行为）。仅对输出到 `log` 文件时生效，不配 `log` 时控制台输出不受影响，服务端无此参数 |
 | `closewait` | int | `0` | 连接拆除前的等待时间（秒） |
 
 </details>
@@ -409,6 +412,7 @@ send errors   : 0
 3. **`scavengettl` 默认 0**：默认永不强制关闭仍有连接的会话，只有显式设置才会兜底回收。
 4. **资源有上限、日志更干净**：最多保留 `conn` 条待回收会话（总量 ≤ `2 × conn`）；正常关闭不再打印 `use of closed network connection`。
 5. **新增 `autoexpire: -1` 全自动模式与 `keepalivetolerance`**：不再按时钟换端口，改由心跳静默 + OOB 存活探测判定端口是否被堵塞，一旦确认则全量切换。这一改动同时绕开了定时轮换的一个已知副作用：服务端（kcp-go Listener）按客户端地址而非 `conv` 归并会话，新旧会话并存时会互相抢占同一地址槽位，表现为轮换后的第一次连接要等 30 秒超时才失败、第二次才成功。全自动模式切换时不留并存会话，因此不存在这个竞态。
+6. **新增 `logsize`（仅客户端）**：给 `-log` 指定的运行日志文件加 KB 级大小上限，写满后按整行丢弃最旧内容、保留最近的，文件永不超限且顺序正确；默认 `0` 保持旧行为，服务端未提供该参数。
 
 </details>
 

@@ -177,6 +177,7 @@ systemctl daemon-reload && systemctl enable --now kcptun
   "smuxver": 2,
   "keepalive": 10,
   "keepalivetolerance": 2,
+  "logsize": 1024,
   "closewait": 0,
   "snmplog": "",
   "snmpperiod": 60,
@@ -189,6 +190,7 @@ Notes:
 - These values must match on both sides: `key`, `crypt`, `datashard`, `parityshard`, `mode` (or `nodelay/interval/resend/nc` in `manual` mode)
 - Windows are mirrored: client `sndwnd` = server `rcvwnd`, and client `rcvwnd` = server `sndwnd`
 - `autoexpire: 300` + `autoexpiremax: 360` rotates the local port every 300–360 seconds at random; set both to `0` to keep a fixed port
+- `logsize: 1024` caps the client running log at 1 MB (the unit is KB): once full, the oldest whole lines are dropped so the file only keeps the most recent tail, still in chronological order and readable with `cat`/`tail`. It does not apply to `snmplog`, and the server has no such option
 - `autoexpire: -1` is the fully automatic mode: ports never rotate by clock, they rotate together only once a port is confirmed blocked. A slot is judged blocked when nothing at all has arrived from the peer for `keepalive × keepalivetolerance` seconds **and** an out-of-band liveness probe stays unanswered. The probe is what tells a blocked path apart from an idle but healthy one, so an idle connection is never torn down. In this mode `autoexpiremax` and `scavengettl` do not apply, and the server has to run the same build (answering probes needs FEC, so `datashard`/`parityshard` must be above 0)
 
 </details>
@@ -238,6 +240,7 @@ The client accepts every transport parameter above (same meaning) plus:
 | `autoexpiremax` | int | `0` | Upper bound of the random rotation interval in seconds, `0` means fixed; must be greater than `autoexpire`, unused in `-1` mode |
 | `scavengettl` | int | `0` | Force-close deadline in seconds for retired connections, `0` means never force close (recommended), unused in `-1` mode |
 | `keepalivetolerance` | int | `2` | How many consecutive unanswered heartbeats a port may tolerate before it is judged blocked, only used with `autoexpire: -1`; `keepalive × keepalivetolerance` has to stay below the 30 second session timeout built into smux |
+| `logsize` | int | `0` | Size cap for the running log file in KB; once full the oldest whole lines are dropped and only the recent tail is kept. `0` means grow forever (legacy behaviour). Only applies when logging to `log`, console output is never capped, and the server has no such option |
 | `closewait` | int | `0` | Seconds to wait before tearing down a connection |
 
 </details>
@@ -252,6 +255,7 @@ The client accepts every transport parameter above (same meaning) plus:
 3. **`scavengettl` defaults to 0**: sessions with live connections are never force-closed unless you explicitly set a deadline.
 4. **Bounded resources and cleaner logs**: at most `conn` retired sessions are kept (total ≤ `2 × conn`), and normal teardown no longer prints `use of closed network connection`.
 5. **New `autoexpire: -1` mode and `keepalivetolerance`**: rotation is no longer clock driven, port blockage is detected from heartbeat silence plus an out-of-band liveness probe, and once confirmed every port switches at once. This also sidesteps a known side effect of timed rotation: the server (kcp-go `Listener`) maps sessions by client address rather than by `conv`, so an old session and its replacement fight over the same address slot, which shows up as the first connection after a rotation failing only after a 30 second timeout while the second one succeeds. The automatic mode never leaves two sessions running side by side, so the race cannot happen.
+6. **New `logsize` (client only)**: a KB-sized cap on the file given to `-log`. Past the cap the oldest whole lines are dropped and only the recent tail is kept, so the file never exceeds the limit while staying in order. `0` keeps the legacy append-forever behaviour, and the server has no such option.
 
 </details>
 

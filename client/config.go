@@ -40,16 +40,20 @@ type Config struct {
 	KeepAlive     int  `json:"keepalive"`
 	// KeepAliveTolerance is how many consecutive heartbeats may stay unanswered
 	// before a port is judged blocked. Only used when autoexpire is -1.
-	KeepAliveTolerance int    `json:"keepalivetolerance"`
-	Log                string `json:"log"`
-	SnmpLog            string `json:"snmplog"`
-	SnmpPeriod         int    `json:"snmpperiod"`
-	Quiet              bool   `json:"quiet"`
-	TCP                bool   `json:"tcp"`
-	Pprof              bool   `json:"pprof"`
-	QPP                bool   `json:"qpp"`
-	QPPCount           int    `json:"qpp-count"`
-	CloseWait          int    `json:"closewait"`
+	KeepAliveTolerance int `json:"keepalivetolerance"`
+	// LogSize caps the running log file in KB by dropping the oldest lines once
+	// it is full. 0 keeps the historical append-forever behaviour.
+	LogSize int `json:"logsize"`
+
+	Log        string `json:"log"`
+	SnmpLog    string `json:"snmplog"`
+	SnmpPeriod int    `json:"snmpperiod"`
+	Quiet      bool   `json:"quiet"`
+	TCP        bool   `json:"tcp"`
+	Pprof      bool   `json:"pprof"`
+	QPP        bool   `json:"qpp"`
+	QPPCount   int    `json:"qpp-count"`
+	CloseWait  int    `json:"closewait"`
 
 	// LossTest runs a one-shot OOB loss test against the server and exits.
 	LossTest         bool   `json:"losstest"`

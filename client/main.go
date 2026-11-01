@@ -214,6 +214,11 @@ func main() {
 			Value: "",
 			Usage: "specify a log file to output, default goes to stderr",
 		},
+		cli.IntFlag{
+			Name:  "logsize",
+			Value: 0,
+			Usage: "max size of the log file in KB, the oldest lines are dropped once it is full, 0 means grow forever",
+		},
 		cli.BoolFlag{
 			Name:  "quiet",
 			Usage: "to suppress the 'stream open/close' messages",
@@ -286,6 +291,7 @@ func main() {
 		config.KeepAlive = c.Int("keepalive")
 		config.KeepAliveTolerance = c.Int("keepalivetolerance")
 		config.Log = c.String("log")
+		config.LogSize = c.Int("logsize")
 		config.SnmpLog = c.String("snmplog")
 		config.SnmpPeriod = c.Int("snmpperiod")
 		config.Quiet = c.Bool("quiet")
@@ -305,9 +311,11 @@ func main() {
 			checkError(err)
 		}
 
-		// log redirect
+		// log redirect, optionally capped: past the limit the oldest whole lines
+		// are dropped, so the file keeps only the most recent tail and stays
+		// readable instead of growing without bound
 		if config.Log != "" {
-			f, err := os.OpenFile(config.Log, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+			f, err := std.NewRollingLog(config.Log, config.LogSize)
 			checkError(err)
 			defer f.Close()
 			log.SetOutput(f)
@@ -376,6 +384,8 @@ func main() {
 		log.Println("autoexpire:", config.AutoExpire)
 		log.Println("autoexpiremax:", config.AutoExpireMax)
 		log.Println("scavengettl:", config.ScavengeTTL)
+		log.Println("log:", config.Log)
+		log.Println("logsize:", config.LogSize)
 		log.Println("snmplog:", config.SnmpLog)
 		log.Println("snmpperiod:", config.SnmpPeriod)
 		log.Println("quiet:", config.Quiet)
@@ -409,6 +419,9 @@ func main() {
 		if config.ScavengeTTL > 0 {
 			color.Red("WARNING: scavengettl is set to %d, sessions with unfinished streams will be force closed.", config.ScavengeTTL)
 			color.Red("Set scavengettl to 0 to guarantee established tcp connections are never cut.")
+		}
+		if config.LogSize > 0 && config.Log == "" {
+			color.Yellow("WARNING: logsize is set to %d KB but no log file is configured, the console output is not capped.", config.LogSize)
 		}
 
 		// Adaptive rotation parameters check, autoexpire=-1 never rotates by clock,
