@@ -7,8 +7,6 @@ import (
 	"encoding/binary"
 	"sync"
 	"time"
-
-	kcp "github.com/xtaci/kcp-go/v5"
 )
 
 // Loss test protocol carried in KCP OOB packets. OOB packets are unreliable
@@ -154,12 +152,13 @@ func DecodeLossTestCtrl(b []byte) (c LossTestCtrl, ok bool) {
 	return c, true
 }
 
-// RegisterLossTestServer installs the OOB handler that serves loss tests on a
+// RegisterLossTestServer installs the OOB handlers that serve loss tests on a
 // freshly accepted session: uplink probes are counted and echoed, the
 // downlink sender is started on request, and control packets are answered
-// with counter reports. OOB requires FEC, so an error is returned when the
-// session has no FEC encoder.
-func RegisterLossTestServer(conn *kcp.UDPSession) error {
+// with counter reports. Handlers live on the session dispatcher, so the health
+// probe and the loss test share the single KCP OOB callback. OOB requires FEC,
+// which the caller has already checked when it built the dispatcher.
+func RegisterLossTestServer(mux *OOBMux) {
 	var mu sync.Mutex
 	uplink := make(map[uint64]uint64) // test id -> received uplink probe count
 	started := make(map[uint64]bool)  // test ids with a running downlink sender
@@ -168,7 +167,7 @@ func RegisterLossTestServer(conn *kcp.UDPSession) error {
 		buf := make([]byte, LossTestCtrlSize)
 		EncodeLossTestCtrl(buf, id, typ, phase, x, y, z)
 		// SendOOB only enqueues the packet, it never blocks.
-		_ = conn.SendOOB(buf)
+		_ = mux.SendOOB(buf)
 	}
 
 	// runDownlink sends downlink probes at the requested rate and reports the
@@ -208,7 +207,7 @@ func RegisterLossTestServer(conn *kcp.UDPSession) error {
 			for i := 0; i < batch; i++ {
 				seq++
 				EncodeLossTestPacket(buf, id, seq, time.Now(), LossTestDirDownlink)
-				if err := conn.SendOOB(buf); err != nil {
+				if err := mux.SendOOB(buf); err != nil {
 					break drain // session gone, stop the sender
 				}
 				sent++
@@ -218,35 +217,41 @@ func RegisterLossTestServer(conn *kcp.UDPSession) error {
 		sendCtrl(id, LossTestCtrlReport, LossTestDirDownlink, 0, sent, 0)
 	}
 
-	return conn.SetOOBHandler(func(b []byte) {
+	mux.Register(LossTestCtrlMagic, func(b []byte) {
+		c, ok := DecodeLossTestCtrl(b)
+		if !ok {
+			return
+		}
+		switch c.Type {
+		case LossTestCtrlDownlinkStart:
+			mu.Lock()
+			first := !started[c.ID]
+			started[c.ID] = true
+			mu.Unlock()
+			if first {
+				go runDownlink(c.ID, int(c.X), int(c.Y), int(c.Z))
+			}
+		case LossTestCtrlUplinkEnd:
+			mu.Lock()
+			received := uplink[c.ID]
+			mu.Unlock()
+			// Idempotent: repeated requests re-report the same counters.
+			sendCtrl(c.ID, LossTestCtrlReport, LossTestDirUplink, received, received, 0)
+		}
+	})
+
+	mux.Register(LossTestMagic, func(b []byte) {
 		if len(b) > LossTestMaxPayload {
 			return
 		}
-		if c, ok := DecodeLossTestCtrl(b); ok {
-			switch c.Type {
-			case LossTestCtrlDownlinkStart:
-				mu.Lock()
-				first := !started[c.ID]
-				started[c.ID] = true
-				mu.Unlock()
-				if first {
-					go runDownlink(c.ID, int(c.X), int(c.Y), int(c.Z))
-				}
-			case LossTestCtrlUplinkEnd:
-				mu.Lock()
-				received := uplink[c.ID]
-				mu.Unlock()
-				// Idempotent: repeated requests re-report the same counters.
-				sendCtrl(c.ID, LossTestCtrlReport, LossTestDirUplink, received, received, 0)
-			}
+		p, ok := DecodeLossTestPacket(b)
+		if !ok || p.Dir != LossTestDirUplink {
 			return
 		}
-		if p, ok := DecodeLossTestPacket(b); ok && p.Dir == LossTestDirUplink {
-			mu.Lock()
-			uplink[p.ID]++
-			mu.Unlock()
-			// Echo the probe back so the client can measure RTT.
-			_ = conn.SendOOB(b)
-		}
+		mu.Lock()
+		uplink[p.ID]++
+		mu.Unlock()
+		// Echo the probe back so the client can measure RTT.
+		_ = mux.SendOOB(b)
 	})
 }

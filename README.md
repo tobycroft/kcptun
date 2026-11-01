@@ -180,6 +180,7 @@ systemctl daemon-reload && systemctl enable --now kcptun
   "streambuf": 16777216,
   "smuxver": 2,
   "keepalive": 10,
+  "keepalivetolerance": 2,
   "closewait": 0,
   "snmplog": "",
   "snmpperiod": 60,
@@ -192,6 +193,7 @@ systemctl daemon-reload && systemctl enable --now kcptun
 - 两端必须一致的参数：`key`、`crypt`、`datashard`、`parityshard`、`mode`（manual 模式下为 `nodelay/interval/resend/nc`）
 - 窗口镜像：客户端 `sndwnd` = 服务端 `rcvwnd`，客户端 `rcvwnd` = 服务端 `sndwnd`
 - 上面的 `autoexpire: 300` + `autoexpiremax: 360` 表示每 300~360 秒（随机）更换一次端口；不需要轮换时把两者都设为 `0` 即可固定端口
+- `autoexpire: -1` 是全自动模式：永不按时间换端口，只有确认某个端口被堵塞时才一次性切换全部端口。判定条件是「连续 `keepalive × keepalivetolerance` 秒收不到对端任何数据」且「OOB 存活探测也无应答」，探测用来区分「链路被堵」和「只是空闲」，空闲但活着的连接不会被拆。该模式下 `autoexpiremax` 与 `scavengettl` 不参与工作，且要求服务端为同版本（探测应答需要 FEC，`datashard`/`parityshard` 需大于 0）
 
 </details>
 
@@ -236,9 +238,10 @@ systemctl daemon-reload && systemctl enable --now kcptun
 | `localaddr` | string | `:12948` | 本地监听地址；不含 `:` 端口时视为 Unix Socket 路径 |
 | `remoteaddr` | string | `vps:29900` | 服务端地址，支持 `IP:29900` 或 `IP:29900-30100` 端口段（每次拨号随机选端口） |
 | `conn` | int | `1` | 建立到服务端的 KCP 连接数，本地连接按轮询分配 |
-| `autoexpire` | int | `0` | 端口轮换周期（秒），0 表示关闭；同时是 `autoexpiremax` 的下限 |
-| `autoexpiremax` | int | `0` | 轮换周期的随机上限（秒），0 表示不随机；需大于 `autoexpire` |
-| `scavengettl` | int | `0` | 旧连接强制回收时限（秒），0 表示永不强制关闭（推荐） |
+| `autoexpire` | int | `0` | 端口轮换周期（秒），`0` 关闭轮换，`-1` 进入按堵塞判定的全自动模式；同时是 `autoexpiremax` 的下限 |
+| `autoexpiremax` | int | `0` | 轮换周期的随机上限（秒），0 表示不随机；需大于 `autoexpire`，`-1` 模式下不生效 |
+| `scavengettl` | int | `0` | 旧连接强制回收时限（秒），0 表示永不强制关闭（推荐），`-1` 模式下不生效 |
+| `keepalivetolerance` | int | `2` | 判定端口堵塞可容忍的连续未应答心跳数，仅 `autoexpire: -1` 时生效；`keepalive × keepalivetolerance` 必须小于 smux 内置的 30 秒会话超时 |
 | `closewait` | int | `0` | 连接拆除前的等待时间（秒） |
 
 </details>
@@ -405,6 +408,7 @@ send errors   : 0
 2. **轮换不再断连**：到期后新连接走新端口，旧连接留在旧会话上继续收发，等自然结束后才关闭。
 3. **`scavengettl` 默认 0**：默认永不强制关闭仍有连接的会话，只有显式设置才会兜底回收。
 4. **资源有上限、日志更干净**：最多保留 `conn` 条待回收会话（总量 ≤ `2 × conn`）；正常关闭不再打印 `use of closed network connection`。
+5. **新增 `autoexpire: -1` 全自动模式与 `keepalivetolerance`**：不再按时钟换端口，改由心跳静默 + OOB 存活探测判定端口是否被堵塞，一旦确认则全量切换。这一改动同时绕开了定时轮换的一个已知副作用：服务端（kcp-go Listener）按客户端地址而非 `conv` 归并会话，新旧会话并存时会互相抢占同一地址槽位，表现为轮换后的第一次连接要等 30 秒超时才失败、第二次才成功。全自动模式切换时不留并存会话，因此不存在这个竞态。
 
 </details>
 

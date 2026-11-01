@@ -176,6 +176,7 @@ systemctl daemon-reload && systemctl enable --now kcptun
   "streambuf": 16777216,
   "smuxver": 2,
   "keepalive": 10,
+  "keepalivetolerance": 2,
   "closewait": 0,
   "snmplog": "",
   "snmpperiod": 60,
@@ -188,6 +189,7 @@ Notes:
 - These values must match on both sides: `key`, `crypt`, `datashard`, `parityshard`, `mode` (or `nodelay/interval/resend/nc` in `manual` mode)
 - Windows are mirrored: client `sndwnd` = server `rcvwnd`, and client `rcvwnd` = server `sndwnd`
 - `autoexpire: 300` + `autoexpiremax: 360` rotates the local port every 300–360 seconds at random; set both to `0` to keep a fixed port
+- `autoexpire: -1` is the fully automatic mode: ports never rotate by clock, they rotate together only once a port is confirmed blocked. A slot is judged blocked when nothing at all has arrived from the peer for `keepalive × keepalivetolerance` seconds **and** an out-of-band liveness probe stays unanswered. The probe is what tells a blocked path apart from an idle but healthy one, so an idle connection is never torn down. In this mode `autoexpiremax` and `scavengettl` do not apply, and the server has to run the same build (answering probes needs FEC, so `datashard`/`parityshard` must be above 0)
 
 </details>
 
@@ -232,9 +234,10 @@ The client accepts every transport parameter above (same meaning) plus:
 | `localaddr` | string | `:12948` | Local listen address; treated as a Unix Socket path when it has no `:` port |
 | `remoteaddr` | string | `vps:29900` | Server address, `IP:29900` or a port range `IP:29900-30100` (a port is picked at random per dial) |
 | `conn` | int | `1` | Number of KCP connections to the server; local connections are assigned round-robin |
-| `autoexpire` | int | `0` | Port rotation interval in seconds, `0` disables it; also the lower bound for `autoexpiremax` |
-| `autoexpiremax` | int | `0` | Upper bound of the random rotation interval in seconds, `0` means fixed; must be greater than `autoexpire` |
-| `scavengettl` | int | `0` | Force-close deadline in seconds for retired connections, `0` means never force close (recommended) |
+| `autoexpire` | int | `0` | Port rotation interval in seconds, `0` disables rotation, `-1` switches to the fully automatic mode driven by the blockage detector; also the lower bound for `autoexpiremax` |
+| `autoexpiremax` | int | `0` | Upper bound of the random rotation interval in seconds, `0` means fixed; must be greater than `autoexpire`, unused in `-1` mode |
+| `scavengettl` | int | `0` | Force-close deadline in seconds for retired connections, `0` means never force close (recommended), unused in `-1` mode |
+| `keepalivetolerance` | int | `2` | How many consecutive unanswered heartbeats a port may tolerate before it is judged blocked, only used with `autoexpire: -1`; `keepalive × keepalivetolerance` has to stay below the 30 second session timeout built into smux |
 | `closewait` | int | `0` | Seconds to wait before tearing down a connection |
 
 </details>
@@ -248,6 +251,7 @@ The client accepts every transport parameter above (same meaning) plus:
 2. **Rotation no longer drops connections**: after expiry, new connections use the new port while existing ones keep running on the old session until they finish naturally.
 3. **`scavengettl` defaults to 0**: sessions with live connections are never force-closed unless you explicitly set a deadline.
 4. **Bounded resources and cleaner logs**: at most `conn` retired sessions are kept (total ≤ `2 × conn`), and normal teardown no longer prints `use of closed network connection`.
+5. **New `autoexpire: -1` mode and `keepalivetolerance`**: rotation is no longer clock driven, port blockage is detected from heartbeat silence plus an out-of-band liveness probe, and once confirmed every port switches at once. This also sidesteps a known side effect of timed rotation: the server (kcp-go `Listener`) maps sessions by client address rather than by `conv`, so an old session and its replacement fight over the same address slot, which shows up as the first connection after a rotation failing only after a 30 second timeout while the second one succeeds. The automatic mode never leaves two sessions running side by side, so the race cannot happen.
 
 </details>
 

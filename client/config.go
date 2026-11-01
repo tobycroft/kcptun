@@ -9,41 +9,47 @@ import (
 
 // Config for client
 type Config struct {
-	LocalAddr     string `json:"localaddr"`
-	RemoteAddr    string `json:"remoteaddr"`
-	Key           string `json:"key"`
-	Crypt         string `json:"crypt"`
-	Mode          string `json:"mode"`
-	Conn          int    `json:"conn"`
-	AutoExpire    int    `json:"autoexpire"`
-	AutoExpireMax int    `json:"autoexpiremax"`
-	ScavengeTTL   int    `json:"scavengettl"`
-	MTU           int    `json:"mtu"`
-	SndWnd        int    `json:"sndwnd"`
-	RcvWnd        int    `json:"rcvwnd"`
-	DataShard     int    `json:"datashard"`
-	ParityShard   int    `json:"parityshard"`
-	DSCP          int    `json:"dscp"`
-	NoComp        bool   `json:"nocomp"`
-	AckNodelay    bool   `json:"acknodelay"`
-	NoDelay       int    `json:"nodelay"`
-	Interval      int    `json:"interval"`
-	Resend        int    `json:"resend"`
-	NoCongestion  int    `json:"nc"`
-	SockBuf       int    `json:"sockbuf"`
-	SmuxVer       int    `json:"smuxver"`
-	SmuxBuf       int    `json:"smuxbuf"`
-	StreamBuf     int    `json:"streambuf"`
-	KeepAlive     int    `json:"keepalive"`
-	Log           string `json:"log"`
-	SnmpLog       string `json:"snmplog"`
-	SnmpPeriod    int    `json:"snmpperiod"`
-	Quiet         bool   `json:"quiet"`
-	TCP           bool   `json:"tcp"`
-	Pprof         bool   `json:"pprof"`
-	QPP           bool   `json:"qpp"`
-	QPPCount      int    `json:"qpp-count"`
-	CloseWait     int    `json:"closewait"`
+	LocalAddr  string `json:"localaddr"`
+	RemoteAddr string `json:"remoteaddr"`
+	Key        string `json:"key"`
+	Crypt      string `json:"crypt"`
+	Mode       string `json:"mode"`
+	Conn       int    `json:"conn"`
+	// AutoExpire rotates every connection after N seconds. 0 disables rotation,
+	// -1 switches to the adaptive mode where nothing rotates by clock and a port
+	// only rotates once keepalive proves it is blocked.
+	AutoExpire    int  `json:"autoexpire"`
+	AutoExpireMax int  `json:"autoexpiremax"`
+	ScavengeTTL   int  `json:"scavengettl"`
+	MTU           int  `json:"mtu"`
+	SndWnd        int  `json:"sndwnd"`
+	RcvWnd        int  `json:"rcvwnd"`
+	DataShard     int  `json:"datashard"`
+	ParityShard   int  `json:"parityshard"`
+	DSCP          int  `json:"dscp"`
+	NoComp        bool `json:"nocomp"`
+	AckNodelay    bool `json:"acknodelay"`
+	NoDelay       int  `json:"nodelay"`
+	Interval      int  `json:"interval"`
+	Resend        int  `json:"resend"`
+	NoCongestion  int  `json:"nc"`
+	SockBuf       int  `json:"sockbuf"`
+	SmuxVer       int  `json:"smuxver"`
+	SmuxBuf       int  `json:"smuxbuf"`
+	StreamBuf     int  `json:"streambuf"`
+	KeepAlive     int  `json:"keepalive"`
+	// KeepAliveTolerance is how many consecutive heartbeats may stay unanswered
+	// before a port is judged blocked. Only used when autoexpire is -1.
+	KeepAliveTolerance int    `json:"keepalivetolerance"`
+	Log                string `json:"log"`
+	SnmpLog            string `json:"snmplog"`
+	SnmpPeriod         int    `json:"snmpperiod"`
+	Quiet              bool   `json:"quiet"`
+	TCP                bool   `json:"tcp"`
+	Pprof              bool   `json:"pprof"`
+	QPP                bool   `json:"qpp"`
+	QPPCount           int    `json:"qpp-count"`
+	CloseWait          int    `json:"closewait"`
 
 	// LossTest runs a one-shot OOB loss test against the server and exits.
 	LossTest         bool   `json:"losstest"`

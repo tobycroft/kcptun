@@ -93,7 +93,7 @@ func main() {
 		cli.IntFlag{
 			Name:  "autoexpire",
 			Value: 0,
-			Usage: "set auto expiration time(in seconds) for a single UDP connection, 0 to disable, also the lower bound of autoexpiremax",
+			Usage: "set auto expiration time(in seconds) for a single UDP connection, 0 to disable, -1 to rotate only when a port is blocked, also the lower bound of autoexpiremax",
 		},
 		cli.IntFlag{
 			Name:  "autoexpiremax",
@@ -190,6 +190,11 @@ func main() {
 			Usage: "seconds between heartbeats",
 		},
 		cli.IntFlag{
+			Name:  "keepalivetolerance",
+			Value: 2,
+			Usage: "how many consecutive heartbeats may stay unanswered before a port is judged blocked, used when autoexpire is -1",
+		},
+		cli.IntFlag{
 			Name:  "closewait",
 			Value: 0,
 			Usage: "the seconds to wait before tearing down a connection",
@@ -279,6 +284,7 @@ func main() {
 		config.StreamBuf = c.Int("streambuf")
 		config.SmuxVer = c.Int("smuxver")
 		config.KeepAlive = c.Int("keepalive")
+		config.KeepAliveTolerance = c.Int("keepalivetolerance")
 		config.Log = c.String("log")
 		config.SnmpLog = c.String("snmplog")
 		config.SnmpPeriod = c.Int("snmpperiod")
@@ -365,6 +371,7 @@ func main() {
 		log.Println("smuxbuf:", config.SmuxBuf)
 		log.Println("streambuf:", config.StreamBuf)
 		log.Println("keepalive:", config.KeepAlive)
+		log.Println("keepalivetolerance:", config.KeepAliveTolerance)
 		log.Println("conn:", config.Conn)
 		log.Println("autoexpire:", config.AutoExpire)
 		log.Println("autoexpiremax:", config.AutoExpireMax)
@@ -404,6 +411,31 @@ func main() {
 			color.Red("Set scavengettl to 0 to guarantee established tcp connections are never cut.")
 		}
 
+		// Adaptive rotation parameters check, autoexpire=-1 never rotates by clock,
+		// a port only rotates once keepalive plus a liveness probe both go unanswered.
+		if config.AutoExpire < 0 {
+			if config.KeepAliveTolerance <= 0 {
+				config.KeepAliveTolerance = 2
+				log.Println("keepalivetolerance normalized to", config.KeepAliveTolerance)
+			}
+			if config.AutoExpireMax > 0 {
+				color.Red("WARNING: autoexpiremax is ignored in adaptive mode, ports never rotate by clock.")
+			}
+			if config.ScavengeTTL != 0 {
+				color.Red("WARNING: scavengettl has no effect in adaptive mode, a blocked port closes its sessions at once instead of draining them.")
+			}
+			if config.KeepAliveTolerance < 2 {
+				color.Red("WARNING: keepalivetolerance %d is aggressive, a single delayed heartbeat rotates every port, 2 or 3 is recommended.", config.KeepAliveTolerance)
+			}
+			// smux itself closes a session that heard nothing for 30 seconds, a wider
+			// window would let the library win the race and drop the streams first.
+			if window := config.KeepAlive * config.KeepAliveTolerance; window >= 30 {
+				color.Red("WARNING: keepalive(%d) x keepalivetolerance(%d) = %ds, the built-in 30s session timeout fires before the detector, lower one of them.",
+					config.KeepAlive, config.KeepAliveTolerance, window)
+			}
+			log.Println("adaptive port rotation enabled: no clock driven switching, all ports switch together when one is judged blocked")
+		}
+
 		// SMUX Version check
 		if config.SmuxVer > maxSmuxVer {
 			log.Fatal("unsupported smux version:", config.SmuxVer)
@@ -415,10 +447,10 @@ func main() {
 		var block kcp.BlockCrypt
 		block, config.Crypt = newBlockCrypt(config.Crypt, pass)
 
-		createConn := func() (*smux.Session, error) {
+		createConn := func() (*smux.Session, *std.ConnHealth, error) {
 			kcpconn, err := dial(&config, block)
 			if err != nil {
-				return nil, errors.Wrap(err, "dial()")
+				return nil, nil, errors.Wrap(err, "dial()")
 			}
 			kcpconn.SetStreamMode(true)
 			kcpconn.SetWriteDelay(false)
@@ -447,24 +479,27 @@ func main() {
 				log.Fatalf("%+v", err)
 			}
 
-			// stream multiplex
-			var session *smux.Session
-			if config.NoComp {
-				session, err = smux.Client(kcpconn, smuxConfig)
-			} else {
-				session, err = smux.Client(std.NewCompStream(kcpconn), smuxConfig)
+			// stream multiplex. The connection is wrapped once more so that the
+			// adaptive detector has something to observe: smux keeps the outcome of
+			// its own heartbeats to itself and offers no way to ask a session whether
+			// the port underneath it still carries traffic.
+			health := std.NewConnHealth(kcpconn)
+			var stream net.Conn = kcpconn
+			if !config.NoComp {
+				stream = std.NewCompStream(kcpconn)
 			}
+			session, err := smux.Client(std.NewHealthStream(stream, health), smuxConfig)
 			if err != nil {
-				return nil, errors.Wrap(err, "createConn()")
+				return nil, nil, errors.Wrap(err, "createConn()")
 			}
-			return session, nil
+			return session, health, nil
 		}
 
 		// wait until a connection is ready
-		waitConn := func() *smux.Session {
+		waitConn := func() (*smux.Session, *std.ConnHealth) {
 			for {
-				if session, err := createConn(); err == nil {
-					return session
+				if session, health, err := createConn(); err == nil {
+					return session, health
 				} else {
 					log.Println("re-connecting:", err)
 					time.Sleep(time.Second)
@@ -481,6 +516,9 @@ func main() {
 		}
 
 		// start listener
+		// the detector runs on its own goroutine, so the slots are shared state now
+		var muxLock sync.Mutex
+		adaptive := config.AutoExpire < 0
 		numconn := uint16(config.Conn)
 		muxes := make([]sessionSlot, numconn)
 		pool := newSessionPool(int(numconn))
@@ -489,6 +527,9 @@ func main() {
 		// start scavenger if autoexpire is set
 		if config.AutoExpire > 0 {
 			go scavenger(pool, &config)
+		}
+		if adaptive {
+			go healthMonitor(&muxLock, muxes, &config)
 		}
 
 		// create shared QPP
@@ -503,19 +544,23 @@ func main() {
 				log.Fatalf("%+v", err)
 			}
 			idx := rr % numconn
+
+			muxLock.Lock()
 			slot := &muxes[idx]
 
 			// do auto expiration && reconnection
 			if slot.session == nil || slot.session.IsClosed() {
-				slot.session = waitConn()
-				slot.expiryDate = time.Now().Add(nextExpire(&config))
+				slot.session, slot.health = waitConn()
+				if !adaptive {
+					slot.expiryDate = time.Now().Add(nextExpire(&config))
+				}
 				slot.deferred = false
-			} else if config.AutoExpire > 0 && time.Now().After(slot.expiryDate) {
+			} else if !adaptive && config.AutoExpire > 0 && time.Now().After(slot.expiryDate) {
 				// rotate to a brand new kcp connection(a new local port) and keep the
 				// old one serving its established streams until they are drained.
 				if pool.canRetire() {
 					old := slot.session
-					slot.session = waitConn()
+					slot.session, slot.health = waitConn()
 					slot.expiryDate = time.Now().Add(nextExpire(&config))
 					pool.retire(old)
 					slot.deferred = false
@@ -525,7 +570,10 @@ func main() {
 				}
 			}
 
-			go handleClient(_Q_, []byte(config.Key), slot.session, p1, config.Quiet, config.CloseWait)
+			session := slot.session
+			muxLock.Unlock()
+
+			go handleClient(_Q_, []byte(config.Key), session, p1, config.Quiet, config.CloseWait)
 			rr++
 		}
 	}
@@ -618,9 +666,11 @@ func checkError(err error) {
 }
 
 // sessionSlot holds the active smux.Session of a connection slot and the
-// moment when it should be rotated to a new local port.
+// moment when it should be rotated to a new local port. In the adaptive mode
+// the expiry date is unused and the health tracker decides instead.
 type sessionSlot struct {
 	session    *smux.Session
+	health     *std.ConnHealth
 	expiryDate time.Time
 	deferred   bool // rotation was deferred because the pool is full, logged once
 }
@@ -712,5 +762,103 @@ func scavenger(pool *sessionPool, config *Config) {
 	defer ticker.Stop()
 	for range ticker.C {
 		pool.reap(config.ScavengeTTL)
+	}
+}
+
+// suspect is a slot whose inbound traffic has gone quiet. The tracker and the
+// address are captured so a probe never needs the slot table.
+type suspect struct {
+	idx    int
+	health *std.ConnHealth
+	local  net.Addr
+}
+
+// healthMonitor implements the adaptive rotation of autoexpire=-1.
+//
+// Nothing switches a port by clock here. A slot becomes suspicious only after it
+// has shown no sign of life for keepalive*tolerance seconds, which is that many
+// heartbeats gone unanswered. Because a healthy but idle path looks exactly the
+// same from the counters, the suspicion is confirmed with an out-of-band
+// liveness probe before anything is torn down: an answered probe restarts the
+// window, so an idle connection is only looked at once per window and is never
+// torn down.
+//
+// The whole decision has to finish inside the detection window, smux closes a
+// silent session itself after 30 seconds, so both the check period and the probe
+// budget are half a heartbeat rather than a full one.
+func healthMonitor(lock *sync.Mutex, muxes []sessionSlot, config *Config) {
+	interval := time.Duration(config.KeepAlive) * time.Second
+	window := interval * time.Duration(config.KeepAliveTolerance)
+	step := interval / 2
+	if step < time.Second {
+		step = time.Second
+	}
+
+	ticker := time.NewTicker(step)
+	defer ticker.Stop()
+	for range ticker.C {
+		// 1. pick the quiet slots, then release the table before probing
+		var suspects []suspect
+		lock.Lock()
+		for i := range muxes {
+			slot := &muxes[i]
+			if slot.session == nil || slot.health == nil || slot.session.IsClosed() {
+				continue
+			}
+			if slot.health.SilentFor() < window {
+				continue
+			}
+			suspects = append(suspects, suspect{
+				idx:    i,
+				health: slot.health,
+				local:  slot.session.LocalAddr(),
+			})
+		}
+		lock.Unlock()
+		if len(suspects) == 0 {
+			continue
+		}
+
+		// 2. confirm outside the lock, a probe waits up to step
+		var blocked *suspect
+		for i := range suspects {
+			s := &suspects[i]
+			if s.health.Probe(step) == std.ProbeAlive {
+				s.health.MarkAlive()
+				log.Println("idle but alive, no rotation:", s.local)
+				continue
+			}
+			// ProbeDead, or ProbeUnavailable when FEC is off. A peer that answers its
+			// heartbeats is never silent for a whole window, so quiet plus an
+			// unanswered probe is as close to a blocked port as this can tell.
+			log.Println("connection judged blocked:", s.local, s.health)
+			blocked = s
+		}
+		if blocked == nil {
+			continue
+		}
+
+		// 3. switch every port at once
+		lock.Lock()
+		rotateAll(muxes, blocked)
+		lock.Unlock()
+	}
+}
+
+// rotateAll closes every session so the accept loop re-dials a fresh local port
+// for each slot on the next connection.
+//
+// Retiring the old ones is deliberately not an option in the adaptive mode: the
+// server keys its KCP sessions by the client address, so an old session and its
+// replacement cannot coexist behind one visible address, they silently steal
+// each other's packets and the first connection afterwards fails. The timed mode
+// still retires, that is the price it pays for draining.
+func rotateAll(muxes []sessionSlot, blocked *suspect) {
+	log.Printf("rotating all %d connections because %v is blocked", len(muxes), blocked.local)
+	for i := range muxes {
+		if s := muxes[i].session; s != nil && !s.IsClosed() {
+			s.Close()
+		}
+		muxes[i] = sessionSlot{}
 	}
 }

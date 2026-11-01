@@ -372,12 +372,12 @@ func main() {
 				log.Println("SetWriteBuffer:", err)
 			}
 
-			// Loss test serving is stateless and only serves one-shot tests;
-			// probes are ignored unless they carry the test magic. It requires
-			// FEC, so skip registration entirely when FEC is disabled.
-			lossTestEcho := config.DataShard > 0 && config.ParityShard > 0
-			if !lossTestEcho {
-				log.Println("loss test disabled: FEC is not enabled")
+			// Out-of-band serving is stateless and only answers one-shot loss
+			// tests and liveness probes, probes are ignored unless they carry a known
+			// magic. It requires FEC, so skip registration entirely when FEC is off.
+			oobEnabled := config.DataShard > 0 && config.ParityShard > 0
+			if !oobEnabled {
+				log.Println("loss test and health probe disabled: FEC is not enabled")
 			}
 			for {
 				if conn, err := lis.AcceptKCP(); err == nil {
@@ -388,9 +388,17 @@ func main() {
 					conn.SetMtu(config.MTU)
 					conn.SetWindowSize(config.SndWnd, config.RcvWnd)
 					conn.SetACKNoDelay(config.AckNodelay)
-					if lossTestEcho {
-						if err := std.RegisterLossTestServer(conn); err != nil {
+					if oobEnabled {
+						// kcp-go keeps one OOB callback per session, so the loss test and
+						// the health probe share a dispatcher.
+						mux, err := std.NewOOBMux(conn)
+						if err != nil {
 							log.Println("loss test disabled (FEC is required):", err)
+						} else {
+							std.RegisterLossTestServer(mux)
+							// Answering probes is what lets a client tell a blocked port
+							// apart from an idle but healthy connection.
+							std.RegisterHealthResponder(mux)
 						}
 					}
 
