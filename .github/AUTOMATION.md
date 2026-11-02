@@ -35,7 +35,7 @@
 | --- | --- |
 | `.github/dependabot.yml` | 依赖更新入口：`gomod`（每日、分组、标签、提交信息前缀）与 `github-actions`（每周一）；并用 `ignore` 屏蔽幽灵版本（见 §4.2） |
 | `.github/workflows/ci.yml` | 编译 + 静态检查 + 测试；job 名 `mod` / `build-test` 就是分支保护里的必需状态检查，也是自动合并的放行条件 |
-| `.github/workflows/automerge-dependabot.yml` | `pull_request` 触发（只处理 `dependabot[bot]` 开的 PR），作业内轮询等待 `mod` / `build-test` 出结论；全绿且无冲突则自动 approve + **squash** 合并，否则保留 PR 并打标签写原因；支持 `workflow_dispatch` 按 PR 编号补跑 |
+| `.github/workflows/automerge-dependabot.yml` | `pull_request` 触发（只处理 `dependabot[bot]` 开的 PR），作业内轮询等待 `mod` / `build-test` 出结论；全绿且无冲突则自动 **squash** 合并，否则保留 PR 并打标签写原因；支持 `workflow_dispatch` 按 PR 编号补跑 |
 | `.github/workflows/dependency-upgrade.yml` | 手动（`workflow_dispatch`）一次性升级到最新：`go get -u ./...` + `go mod tidy` + 校验 + 开 PR |
 | `.github/workflows/release.yml` | 依赖升级入主干后自动打 tag、构建 21 个产物、生成校验和与说明、创建 GitHub Release；主链路为 `workflow_run`，另有 push tag / push master / 手动三条入口；支持 `dry_run` 预演 |
 | `.github/scripts/build-dist.sh` | 多平台构建与 `checksums.txt` 生成（本地可执行同一脚本做核对） |
@@ -67,18 +67,16 @@ Dependabot PR ──▶ CI(mod/build-test) ──▶ automerge(squash 合并到 
    只有当你想改用手点 Dependabot 的 “Enable auto-merge” 按钮时才必须开启。
 3. **分支保护（可选，但推荐）**。若开启，必须同时做两件事，否则自动合并会被拒：
    - 必需状态检查填 `mod` 与 `build-test`（就是 `ci.yml` 的两个 job 名）；
-   - 把 “Require a pull request before merging” 的审批数设为 `0`，
-     或者配置 secret `AUTOMERGE_TOKEN`（见下）。
+   - 把 “Require a pull request before merging” 的审批数设为 `0`。
+     工作流不做 approve（GitHub 平台限制：`GITHUB_TOKEN` 无法 approve 自己触发的 PR，
+     审批要求无法被自动化满足），因此分支保护一旦要求 ≥1 个 approval，自动合并就会被拒，
+     只能人工 approval 后合并。
 
    ```bash
    echo '{"required_status_checks":{"strict":false,"contexts":["mod","build-test"]},"required_pull_request_reviews":{"required_approving_review_count":0},"enforce_admins":false,"restrictions":null}' \
      | gh api -X PUT repos/tobycroft/kcptun/branches/master/protection --input -
    ```
-4. **secret `AUTOMERGE_TOKEN`（可选）**：仅当分支保护要求 ≥1 个 approval 时才需要。
-   值必须来自**另一个账号/机器人账号**的 PAT（fine-grained：Contents: Read & write → 仓库 `kcptun`；
-   或 classic：`repo`）。GitHub 平台限制：工作流不能用 `GITHUB_TOKEN` approve 自己触发的 PR，
-   `GITHUB_TOKEN` 也不能给自己创建的 PR 投 approval。未配置该 secret 时，approve 步骤会打印提示并跳过。
-5. **权限**：所有工作流都显式声明最小权限且只用 `secrets.*`，仓库内**不含任何硬编码 token**：
+4. **权限**：所有工作流都显式声明最小权限且只用 `secrets.*`，仓库内**不含任何硬编码 token**：
    - `ci.yml`：`contents: read`
    - `automerge-dependabot.yml`：`contents: write` + `pull-requests: write`
      （实测：只有 `pull-requests: write` 时 `gh pr merge` 会 403，因为合并要向 master 写提交）
@@ -167,7 +165,7 @@ VERSION=v20261030.1 bash .github/scripts/build-dist.sh
    注意：**工作流文件取自 PR 的头分支**，因此已存在的 Dependabot 分支若是在修正前建的，
    需等 Dependabot 下一次每日检查 rebase，或在 PR 下发 `@dependabot recreate` 重生成分支，
    新版的 automerge 工作流才会生效。
-   检查点：PR 上出现 `mod` / `build-test` 两个检查 → 全绿后 `automerge` 作业轮询到结论并自动 approve + squash 合并 →
+   检查点：PR 上出现 `mod` / `build-test` 两个检查 → 全绿后 `automerge` 作业轮询到结论并自动 squash 合并 →
    合并提交带 `dependencies` / `go` 标签 → **`Release` 由 `workflow_run` 接手**（不依赖被抑制的 push 事件）、
    过内容闸门后打 tag 并发布新版本。
    反面样本（实测）：PR #4 把 `github.com/xtaci/smux` 从 1.5.58 升到 **2.0.1+incompatible**（major），
@@ -189,7 +187,7 @@ VERSION=v20261030.1 bash .github/scripts/build-dist.sh
 | `Automerge` 没跑 | ① 触发已改为 `pull_request`（`check_run` 在 Dependabot PR 上不会创建运行）；② PR 头分支里仍旧着旧版工作流文件 | 确认 PR 作者为 `dependabot[bot]`；必要时 `@dependabot recreate` 重生成分支；或用 `workflow_dispatch` 填入 PR 编号补跑 |
 | `不自动合并：必需检查 mod 未通过（结论：failure）` | CI 真的失败 | 按 `automerge-skip` 标签与 PR 评论修代码/回滚该依赖 |
 | `PR 当前不可合并（mergeable=false）` | 与主干冲突 | 在 PR 上点 “Update branch” 或本地 rebase 后重推，CI 重新全绿会自动合并 |
-| `Resource not accessible by integration` / 合并被拒 | ① 工作流缺 `contents: write`（合并会写 master，实测必需）；② 分支保护要求 approval 而未配置可 approve 的账号 | 保持 `contents: write` + `pull-requests: write`；如要求 approval 则配 `AUTOMERGE_TOKEN`，或把 required_approving_review_count 设为 0。合并失败现在会保留 PR、打 `automerge-skip` 并把原始报错贴到 PR 评论 |
+| `Resource not accessible by integration` / 合并被拒 | ① 工作流缺 `contents: write`（合并会写 master，实测必需）；② 分支保护要求 approval（工作流不执行 approve，无法自动满足） | 保持 `contents: write` + `pull-requests: write`；把 required_approving_review_count 设为 0，否则该类 PR 只能人工 approval 后合并。合并失败现在会保留 PR、打 `automerge-skip` 并把原始报错贴到 PR 评论 |
 | `gh: pull request is not mergeable` | 与上一条同类，或 squash 被仓库关闭 | `gh repo edit tobycroft/kcptun --enable-squash-merge` |
 | `Release` 没被触发 | 最常见原因：触发它的 push 是由 `GITHUB_TOKEN` 写的（已被合并提交 `c0366e8e` 实测证实）—— 现在靠 `workflow_run` 补救；其次是 automerge 未成功（conclusion 不是 success）或 `go.mod` / `go.sum` 自上一个 tag 以来没变化 | 看 Automerge 运行是否 success；看 `Plan tag` 步骤输出的 `skip_reason`（会写明是 tag 序号、依然无依赖变更、还是 Release 已存在）；实在需要发布就手动触发 `Release` 并指定 tag |
 | `Release` 被 push 触发了，但**整个 run 直接是 skipped**（连 `build` job 都没输出） | job 级 `if` 引用了 payload 里不存在的属性，求值失败被静默跳过，不报任何错。实踩两次：`github.event.ref_type`（**push 事件无此字段**，只有 create/delete 事件有）与 `github.event.head_commit.author.login`（push payload 的 author 只含 `name/email/username`） | 表达式只碰确定存在的字段：tag/分支用 `startsWith(github.ref, 'refs/tags/')` 判，作者用 `author.username`；并在 shell 里用 `case '${{ github.ref }}' in refs/tags/*)` 而非 `'${{ ... }}'` 嵌套单引号。这类静默 skip 只能靠 `actions/runs/<id>` 看 `event` 与 `conclusion` 定位 |

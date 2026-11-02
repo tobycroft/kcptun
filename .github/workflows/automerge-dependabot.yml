@@ -265,24 +265,6 @@ jobs:
           create_label 'dependencies' '0366d6' 'Pull requests that update a dependency file'
           create_label 'go' '16e2e2' 'Pull requests that update go code'
 
-      - name: Approve pull request
-        if: steps.gates.outputs.decision == 'merge'
-        env:
-          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
-          # 可选 secret：未配置时展开为空串，脚本内已按“跳过 approve”处理
-          AUTOMERGE_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
-        run: |
-          set -euo pipefail
-          # 优先用独立账号 / PAT 完成 approve（分支保护要求 approval 时必须有；
-          # GITHUB_TOKEN 无法 approve 自己触发的 PR，属已知平台限制）。
-          # 未配置 AUTOMERGE_TOKEN 时跳过 approve：分支保护未强制 approval 也能正常合并。
-          if [ -z "${AUTOMERGE_TOKEN}" ]; then
-            echo "未配置 secrets.AUTOMERGE_TOKEN，跳过显式 approve（如分支保护要求 approval，请配置该 secret）"
-            exit 0
-          fi
-          gh pr review "${PR_NUMBER}" --repo "${{ github.repository }}" --approve \
-            --body '自动检查通过（CI: mod / build-test 全绿，无冲突），自动批准合并。'
-
       - name: Merge with squash
         id: merge
         if: steps.gates.outputs.decision == 'merge'
