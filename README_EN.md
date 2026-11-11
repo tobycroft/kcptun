@@ -9,11 +9,75 @@ A TCP-over-KCP tunnel: the client multiplexes local TCP connections onto KCP (UD
 - **Loss tolerance**: KCP ARQ + fast retransmit + Reed-Solomon FEC
 - **Multiplexing**: smux carries many TCP streams over a single KCP session
 - **Security**: pre-shared key plus optional encryption, compression, and QPP
-- **Stability**: periodic port rotation without dropping established connections
+- **Stability**: timed rotation keeps established connections alive, and the blockage-driven `autoexpire: -1` mode is the recommended upgrade
 
 ![Architecture](assets/architecturenew.jpeg)
 
 > Details such as manual setup, configuration examples, parameters, and differences from upstream are collapsed by default — click a section title to expand it.
+
+## What Makes This Special Build Different
+
+Upstream kcptun only rotates ports on a timer. This build adds a **blockage-driven** automatic mode: ports no longer rotate by clock, they all switch together only once a port is confirmed blocked. To enable it, write this into `client-config.json`:
+
+```json
+{
+  "autoexpire": -1,
+  "autoexpiremax": 0,
+  "scavengettl": 0,
+  "keepalive": 10,
+  "keepalivetolerance": 2
+}
+```
+
+- `autoexpire: -1` is the switch itself, any negative value enables the automatic mode
+- Keep `autoexpiremax` and `scavengettl` at `0`; neither of them takes part in this mode
+- `keepalive` and `keepalivetolerance` decide how fast a port is judged: it takes `keepalive × keepalivetolerance` seconds of silence before the port is suspected, and that product must stay below 30 (the session timeout built into smux). The default `10 × 2 = 20` seconds is fine
+- The server has to run the same build with FEC enabled (`datashard` / `parityshard` above 0)
+
+<details>
+<summary><strong>Other ways to combine the three parameters</strong> (timed / randomized / disabled rotation)</summary>
+
+### Other ways to combine the three parameters
+
+`autoexpire` and `autoexpiremax` decide *when* to rotate, `scavengettl` decides *how* a retired session leaves:
+
+| Configuration | Behaviour | When to use |
+| --- | --- | --- |
+| `autoexpire: 0` | No rotation, fixed port; `autoexpiremax` and `scavengettl` have no effect | The port is not targeted and you want the simplest setup |
+| `autoexpire: N`, `autoexpiremax: 0` | Rotate every N seconds, fixed interval | Upstream behaviour |
+| `autoexpire: N`, `autoexpiremax: M` (M > N) | Each connection expires randomly within `[N, M]` seconds | Keeps `conn` connections from switching in the same second |
+| `autoexpire: -1` | Automatic mode: never rotates by clock, switches every port at once only when a port is confirmed blocked | Lossy links, QoS-throttled or port-targeted routes |
+
+| `scavengettl` | Behaviour |
+| --- | --- |
+| `0` (default, recommended) | The old session lives until its TCP streams finish on their own, established connections are never cut |
+| `N` | N seconds after retirement the session is force-closed even with unfinished streams, a safety net against long-lived retired sessions |
+
+Three constraints:
+
+- In the timed mode the retire pool holds `conn` sessions; when it is full the rotation is postponed until one drains (logged as `rotation deferred`), so the process never holds more than `2 × conn` sessions and resource usage stays bounded.
+- `autoexpiremax` is ignored when it is not greater than `autoexpire`; `autoexpiremax` does nothing while `autoexpire` is `0` (a warning is printed).
+- With `autoexpire: -1`, neither `autoexpiremax` nor `scavengettl` applies, and old sessions are closed instead of drained.
+
+</details>
+
+<details>
+<summary><strong>Stability</strong>: from "one drop every 10 minutes" to "4–6 a day"</summary>
+
+### Stability: From "One Drop Every 10 Minutes" to "4–6 a Day"
+
+Timed rotation carries an unavoidable trade-off: upstream drops connections on every switch no matter how the traffic is scheduled, so the only way to drop less is to stretch the interval to 10 minutes – 1 hour. The longer the interval, the more likely a port is already blocked while the client waits for the next expiry — at the 3 hour extreme a blocked port can stay blocked for hours without ever rotating.
+
+This build improves it in two steps: the timed mode retires sessions by draining them, so established connections no longer break just because a timer expired; and `autoexpire: -1` removes the clock altogether, leaving the number of switches to be decided purely by whether the route actually fails:
+
+| Configuration | Average drop rate | Per day |
+| --- | --- | --- |
+| Timed rotation (previous best settings) | about once every 10 minutes | 1440 / 10 = **144 per day** |
+| This build, `autoexpire: -1` | 4–6 times per 24 hours | **4–6 per day** |
+
+That is a **24–36× reduction (roughly 96%–97%)** under normal conditions: an idle but healthy connection is never torn down just because its timer expired, and only a really poor environment (constant loss, a port repeatedly QoS-throttled) falls back toward the old numbers. Day-to-day operation needs no manual intervention, so the management burden is close to zero.
+
+</details>
 
 ## One-Click Server Setup (Recommended)
 
