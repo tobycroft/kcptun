@@ -33,3 +33,4 @@ dist/
 before.txt
 after.txt
 dep-changes.md
+.workbuddy/
