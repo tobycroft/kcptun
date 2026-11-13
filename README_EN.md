@@ -270,46 +270,79 @@ Notes:
 
 ### Server
 
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `listen` | string | `:29900` | Listen address; `IP:29900` for a single port, `IP:29900-30100` for a port range |
-| `target` | string | `127.0.0.1:12948` | Acceleration target, a TCP address or a Unix Socket path |
-| `key` | string | `it's a secrect` | Pre-shared key, must match on both sides (also `KCPTUN_KEY` env var) |
-| `crypt` | string | `aes` | Cipher: `aes`, `aes-128`, `aes-192`, `salsa20`, `blowfish`, `twofish`, `cast5`, `3des`, `tea`, `xtea`, `xor`, `sm4`, `none`, `null` |
-| `mode` | string | `fast` | Mode preset: `fast3` / `fast2` / `fast` / `normal` / `manual` |
-| `mtu` | int | `1350` | Maximum transmission unit for UDP packets |
-| `sndwnd` / `rcvwnd` | int | `1024` | Send / receive window size in packets |
-| `datashard` / `parityshard` | int | `10` / `3` | Reed-Solomon FEC data and parity shards, must match on both sides |
-| `dscp` | int | `0` | DSCP code point (6 bits) |
-| `nocomp` | bool | `false` | Disable Snappy compression |
-| `sockbuf` | int | `4194304` | Per-socket send/receive buffer in bytes |
-| `smuxver` | int | `1` | smux version, `1` or `2` |
-| `smuxbuf` | int | `4194304` | smux session-level buffer in bytes |
-| `streambuf` | int | `2097152` | Per-stream receive buffer in bytes (smux v2+) |
-| `keepalive` | int | `10` | Heartbeat interval in seconds |
-| `closewait` | int | `30` | Seconds to wait before tearing down a connection |
-| `snmplog` / `snmpperiod` | string / int | `""` / `60` | Traffic statistics file and collection period |
-| `pprof` | bool | `false` | Enable profiling server on `:6060` |
-| `log` | string | `""` | Log file, stderr by default |
-| `quiet` | bool | `false` | Suppress stream open/close logs |
-| `tcp` | bool | `false` | Also listen on a TCP-emulated stack (Linux only) |
-| `qpp` / `qpp-count` | bool / int | `false` / `61` | QPP quantum permutation pad toggle and pad count |
+| Parameter | Type | Default | Settable values | Description |
+| --- | --- | --- | --- | --- |
+| `listen` | string | `:29900` | any `IP:port` or `IP:minport-maxport` (port range) | Listen address; in range mode a port is picked at random per connection |
+| `target` | string | `127.0.0.1:12948` | TCP address or Unix Socket path | Acceleration target |
+| `key` | string | `it's a secrect` | any string (must match on both sides; also `KCPTUN_KEY` env var) | Pre-shared key |
+| `crypt` | string | `aes` | `aes`, `aes-128`, `aes-192`, `salsa20`, `blowfish`, `twofish`, `cast5`, `3des`, `tea`, `xtea`, `xor`, `sm4`, `none`, `null` (must match) | Cipher; unknown values fall back to `aes` |
+| `mode` | string | `fast` | `fast3` / `fast2` / `fast` / `normal` / `manual` | Mode preset; `manual` uses `nodelay` / `interval` / `resend` / `nc` |
+| `mtu` | int | `1350` | `1000`–`1400` recommended | UDP packet MTU, avoid fragmentation |
+| `sndwnd` / `rcvwnd` | int | `1024` | `≥1` (packets) | Send / receive window size |
+| `datashard` / `parityshard` | int | `10` / `3` | `datashard + parityshard ≤ 255` (must match) | Reed-Solomon FEC data and parity shards; both must be `> 0` to enable the loss test |
+| `dscp` | int | `0` | `0`–`63` (6 bits) | DSCP code point |
+| `nocomp` | bool | `false` | `true` / `false` | Disable Snappy compression |
+| `acknodelay` | bool | `false` | `true` / `false` | Flush ACK immediately on packet receipt (manual-related, hidden flag) |
+| `nodelay` | int | `0` | `0` / `1` | KCP no-delay switch (manual mode, hidden flag) |
+| `interval` | int | `50` | typical `10`–`60` (ms) | Internal retransmit interval (manual mode, hidden flag) |
+| `resend` | int | `0` | `0` / `1` / `2` | Fast-retransmit count (manual mode, hidden flag) |
+| `nc` | int | `0` | `0` / `1` | Congestion-control off switch (manual mode, hidden flag) |
+| `sockbuf` | int | `4194304` | typically `4MB`–`64MB` (bytes) | Per-socket send/receive buffer |
+| `smuxver` | int | `1` | `1` / `2` | smux version |
+| `smuxbuf` | int | `4194304` | bytes | smux session-level buffer |
+| `streambuf` | int | `2097152` | bytes | Per-stream receive buffer (smux v2+) |
+| `keepalive` | int | `10` | `>0` (seconds) | Heartbeat interval |
+| `closewait` | int | `30` | `≥0` (seconds) | Seconds to wait before tearing down a connection |
+| `snmplog` / `snmpperiod` | string / int | `""` / `60` | file path (empty = off) / `>0` (seconds) | Traffic statistics file and collection period |
+| `pprof` | bool | `false` | `true` / `false` | Enable profiling server on `:6060` |
+| `log` | string | `""` | file path (empty = stderr) | Log file |
+| `quiet` | bool | `false` | `true` / `false` | Suppress stream open/close logs |
+| `tcp` | bool | `false` | `true` / `false` | Also listen on a TCP-emulated stack (Linux only) |
+| `qpp` / `qpp-count` | bool / int | `false` / `61` | `true`/`false` / prime `≥8` | QPP quantum permutation pad toggle and pad count (more pads = safer, 256 bytes each, prime recommended) |
 
 ### Client
 
-The client accepts every transport parameter above (same meaning) plus:
+The client fully supports every transport parameter of the server (meaning in the table above, defaults in this table; note `sndwnd` defaults to `128` and `rcvwnd` to `512`, unlike the server's `1024`). The table below lists every parameter: transport parameters only show their default and settable values, while client-only parameters are fully described.
 
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `localaddr` | string | `:12948` | Local listen address; treated as a Unix Socket path when it has no `:` port |
-| `remoteaddr` | string | `vps:29900` | Server address, `IP:29900` or a port range `IP:29900-30100` (a port is picked at random per dial) |
-| `conn` | int | `1` | Number of KCP connections to the server; local connections are assigned round-robin |
-| `autoexpire` | int | `0` | Port rotation interval in seconds, `0` disables rotation, `-1` switches to the fully automatic mode driven by the blockage detector; also the lower bound for `autoexpiremax` |
-| `autoexpiremax` | int | `0` | Upper bound of the random rotation interval in seconds, `0` means fixed; must be greater than `autoexpire`, unused in `-1` mode |
-| `scavengettl` | int | `0` | Force-close deadline in seconds for retired connections, `0` means never force close (recommended), unused in `-1` mode |
-| `keepalivetolerance` | int | `2` | How many consecutive unanswered heartbeats a port may tolerate before it is judged blocked, only used with `autoexpire: -1`; `keepalive × keepalivetolerance` has to stay below the 30 second session timeout built into smux |
-| `logsize` | int | `0` | Size cap for the running log file in KB; once full the oldest whole lines are dropped and only the recent tail is kept. `0` means grow forever (legacy behaviour). Only applies when logging to `log`, console output is never capped, and the server has no such option |
-| `closewait` | int | `0` | Seconds to wait before tearing down a connection |
+| Parameter | Type | Default | Settable values | Description |
+| --- | --- | --- | --- | --- |
+| `localaddr` | string | `:12948` | any `IP:port` or Unix Socket path (no `:` means socket path) | Local listen address |
+| `remoteaddr` | string | `vps:29900` | `IP:port` or `IP:minport-maxport` (range, picked at random per dial) | Server address |
+| `conn` | int | `1` | `≥1` | Number of KCP connections to the server; local connections assigned round-robin |
+| `autoexpire` | int | `0` | `0` (off) / `-1` (blockage-driven) / `N>0` (seconds, lower bound of `autoexpiremax`) | Port rotation interval |
+| `autoexpiremax` | int | `0` | `0` (fixed) / `M>autoexpire` (random upper bound, seconds) | Random upper bound of rotation; unused in `-1` mode |
+| `scavengettl` | int | `0` | `0` (never force close, recommended) / `N>0` (seconds) | Force-close deadline for retired connections; unused in `-1` mode |
+| `keepalivetolerance` | int | `2` | `≥1`, and `keepalive × keepalivetolerance < 30` | Consecutive unanswered heartbeats tolerated before a port is judged blocked; only used with `autoexpire: -1` |
+| `logsize` | int | `0` | `0` (unlimited) / `N>0` (KB) | Size cap for the running log file; oldest lines dropped when full; only applies to `-log`, no such option on the server |
+| `closewait` | int | `0` | `≥0` (seconds) | Seconds to wait before tearing down a connection (server default is `30`) |
+| `key` | string | `it's a secrect` | same as server | Pre-shared key |
+| `crypt` | string | `aes` | same as server | Cipher |
+| `mode` | string | `fast` | same as server | Mode preset |
+| `mtu` | int | `1350` | `1000`–`1400` recommended | UDP MTU |
+| `sndwnd` | int | `128` | `≥1` (packets) | Send window (default differs from server) |
+| `rcvwnd` | int | `512` | `≥1` (packets) | Receive window (default differs from server) |
+| `datashard` | int | `10` | `datashard + parityshard ≤ 255` | FEC data shards |
+| `parityshard` | int | `3` | same as above | FEC parity shards |
+| `dscp` | int | `0` | `0`–`63` | DSCP |
+| `nocomp` | bool | `false` | `true`/`false` | Disable compression |
+| `acknodelay` | bool | `false` | `true`/`false` | Flush ACK immediately (manual-related) |
+| `nodelay` | int | `0` | `0`/`1` | No-delay switch (manual) |
+| `interval` | int | `50` | `10`–`60` (ms) | Retransmit interval (manual) |
+| `resend` | int | `0` | `0`/`1`/`2` | Fast retransmit (manual) |
+| `nc` | int | `0` | `0`/`1` | Congestion-control off (manual) |
+| `sockbuf` | int | `4194304` | typically `4MB`–`64MB` (bytes) | Socket buffer |
+| `smuxver` | int | `1` | `1`/`2` | smux version |
+| `smuxbuf` | int | `4194304` | bytes | smux session buffer |
+| `streambuf` | int | `2097152` | bytes | smux per-stream buffer |
+| `keepalive` | int | `10` | `>0` (seconds) | Heartbeat interval |
+| `log` | string | `""` | file path (empty = stderr) | Log file |
+| `snmplog` / `snmpperiod` | string / int | `""` / `60` | file path (empty = off) / `>0` (seconds) | Traffic statistics |
+| `quiet` | bool | `false` | `true`/`false` | Suppress stream logs |
+| `tcp` | bool | `false` | `true`/`false` | TCP emulation (Linux only) |
+| `pprof` | bool | `false` | `true`/`false` | Profiling |
+| `qpp` / `qpp-count` | bool / int | `false` / `61` | same as server | QPP pads |
+
+> Client-only parameters and default differences: besides `localaddr` / `remoteaddr` / `conn` / `autoexpire` / `autoexpiremax` / `scavengettl` / `keepalivetolerance` / `logsize`, the client defaults for `sndwnd` (128), `rcvwnd` (512) and `closewait` (0) differ from the server. Loss-test parameters (`losstest` and friends) are in the "Loss Test · Parameters" section below.
 
 </details>
 

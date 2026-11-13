@@ -270,46 +270,79 @@ systemctl daemon-reload && systemctl enable --now kcptun
 
 ### 服务端
 
-| 参数 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `listen` | string | `:29900` | 监听地址，`IP:29900` 为单端口，`IP:29900-30100` 为端口段 |
-| `target` | string | `127.0.0.1:12948` | 加速目标，TCP 地址或 Unix Socket 路径 |
-| `key` | string | `it's a secrect` | 预共享密钥，两端一致（也可用环境变量 `KCPTUN_KEY`） |
-| `crypt` | string | `aes` | 加密方式：`aes`、`aes-128`、`aes-192`、`salsa20`、`blowfish`、`twofish`、`cast5`、`3des`、`tea`、`xtea`、`xor`、`sm4`、`none`、`null` |
-| `mode` | string | `fast` | 加速模式：`fast3` / `fast2` / `fast` / `normal` / `manual` |
-| `mtu` | int | `1350` | UDP 包最大传输单元 |
-| `sndwnd` / `rcvwnd` | int | `1024` | 发送 / 接收窗口（包数量） |
-| `datashard` / `parityshard` | int | `10` / `3` | Reed-Solomon 前向纠错分片与冗余，两端一致 |
-| `dscp` | int | `0` | DSCP 差分服务代码点（6bit） |
-| `nocomp` | bool | `false` | 关闭 Snappy 压缩 |
-| `sockbuf` | int | `4194304` | 单 socket 收发缓冲区（字节） |
-| `smuxver` | int | `1` | smux 版本，可选 `1` / `2` |
-| `smuxbuf` | int | `4194304` | smux 会话级缓冲区（字节） |
-| `streambuf` | int | `2097152` | smux v2+ 单流接收缓冲区（字节） |
-| `keepalive` | int | `10` | 心跳间隔（秒） |
-| `closewait` | int | `30` | 连接拆除前的等待时间（秒） |
-| `snmplog` / `snmpperiod` | string / int | `""` / `60` | 流量统计输出文件与周期 |
-| `pprof` | bool | `false` | 在 `:6060` 开启性能剖析 |
-| `log` | string | `""` | 日志文件，默认输出到 stderr |
-| `quiet` | bool | `false` | 屏蔽 stream open/close 日志 |
-| `tcp` | bool | `false` | 同时监听 TCP 伪装栈（仅 Linux） |
-| `qpp` / `qpp-count` | bool / int | `false` / `61` | QPP 量子置换垫层开关与垫层数量 |
+| 参数 | 类型 | 默认值 | 可设定值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `listen` | string | `:29900` | 任意 `IP:port` 或 `IP:minport-maxport`（端口段） | 监听地址，端口段模式下每次连接随机选端口 |
+| `target` | string | `127.0.0.1:12948` | TCP 地址或 Unix Socket 路径 | 加速目标 |
+| `key` | string | `it's a secrect` | 任意字符串（两端一致；也可用环境变量 `KCPTUN_KEY`） | 预共享密钥 |
+| `crypt` | string | `aes` | `aes` / `aes-128` / `aes-192` / `salsa20` / `blowfish` / `twofish` / `cast5` / `3des` / `tea` / `xtea` / `xor` / `sm4` / `none` / `null`（两端一致） | 加密方式，未知值回退到 `aes` |
+| `mode` | string | `fast` | `fast3` / `fast2` / `fast` / `normal` / `manual` | 加速模式；`manual` 下使用 `nodelay` / `interval` / `resend` / `nc` 自定义 |
+| `mtu` | int | `1350` | 建议 `1000`~`1400` | UDP 包最大传输单元，避免分片 |
+| `sndwnd` / `rcvwnd` | int | `1024` | `≥1`（包数量） | 发送 / 接收窗口 |
+| `datashard` / `parityshard` | int | `10` / `3` | `datashard + parityshard ≤ 255`（两端一致） | Reed-Solomon 前向纠错分片与冗余；开启丢包测试需两者均 `> 0` |
+| `dscp` | int | `0` | `0`~`63`（6 bit） | DSCP 差分服务代码点 |
+| `nocomp` | bool | `false` | `true` / `false` | 关闭 Snappy 压缩 |
+| `acknodelay` | bool | `false` | `true` / `false` | 收到包立即发送 ACK（`manual` 模式相关，隐藏参数） |
+| `nodelay` | int | `0` | `0` / `1` | KCP 低延迟开关（`manual` 模式，隐藏参数） |
+| `interval` | int | `50` | 典型 `10`~`60`（毫秒） | 内部重传间隔（`manual` 模式，隐藏参数） |
+| `resend` | int | `0` | `0` / `1` / `2` | 快速重传次数（`manual` 模式，隐藏参数） |
+| `nc` | int | `0` | `0` / `1` | 是否关闭拥塞控制（`manual` 模式，隐藏参数） |
+| `sockbuf` | int | `4194304` | 一般 `4MB`~`64MB`（字节） | 单 socket 收发缓冲区 |
+| `smuxver` | int | `1` | `1` / `2` | smux 版本 |
+| `smuxbuf` | int | `4194304` | 字节 | smux 会话级缓冲区 |
+| `streambuf` | int | `2097152` | 字节 | smux v2+ 单流接收缓冲区 |
+| `keepalive` | int | `10` | `>0`（秒） | 心跳间隔 |
+| `closewait` | int | `30` | `≥0`（秒） | 连接拆除前的等待时间 |
+| `snmplog` / `snmpperiod` | string / int | `""` / `60` | 文件路径（空=不记录）/ `>0`（秒） | 流量统计输出文件与周期 |
+| `pprof` | bool | `false` | `true` / `false` | 在 `:6060` 开启性能剖析 |
+| `log` | string | `""` | 文件路径（空=stderr） | 日志文件 |
+| `quiet` | bool | `false` | `true` / `false` | 屏蔽 stream open/close 日志 |
+| `tcp` | bool | `false` | `true` / `false` | 同时监听 TCP 伪装栈（仅 Linux） |
+| `qpp` / `qpp-count` | bool / int | `false` / `61` | `true`/`false` / 质数 `≥8` | QPP 量子置换垫层开关与垫层数量（越大越安全，每 pad 256 字节，建议取质数） |
 
 ### 客户端
 
-客户端包含服务端的全部传输层参数（含义相同），另有：
+客户端完整支持服务端全部传输层参数（含义见上表，默认值见本表；注意 `sndwnd` 默认 `128`、`rcvwnd` 默认 `512`，与服务端的 `1024` 不同）。下表列出全部参数，传输层参数仅标注默认值与可设定值，独有参数给出完整说明。
 
-| 参数 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `localaddr` | string | `:12948` | 本地监听地址；不含 `:` 端口时视为 Unix Socket 路径 |
-| `remoteaddr` | string | `vps:29900` | 服务端地址，支持 `IP:29900` 或 `IP:29900-30100` 端口段（每次拨号随机选端口） |
-| `conn` | int | `1` | 建立到服务端的 KCP 连接数，本地连接按轮询分配 |
-| `autoexpire` | int | `0` | 端口轮换周期（秒），`0` 关闭轮换，`-1` 进入按堵塞判定的全自动模式；同时是 `autoexpiremax` 的下限 |
-| `autoexpiremax` | int | `0` | 轮换周期的随机上限（秒），0 表示不随机；需大于 `autoexpire`，`-1` 模式下不生效 |
-| `scavengettl` | int | `0` | 旧连接强制回收时限（秒），0 表示永不强制关闭（推荐），`-1` 模式下不生效 |
-| `keepalivetolerance` | int | `2` | 判定端口堵塞可容忍的连续未应答心跳数，仅 `autoexpire: -1` 时生效；`keepalive × keepalivetolerance` 必须小于 smux 内置的 30 秒会话超时 |
-| `logsize` | int | `0` | 运行日志文件的大小上限（KB），写满后丢弃最旧的整行、只保留最近的内容；`0` 表示不限长度（旧行为）。仅对输出到 `log` 文件时生效，不配 `log` 时控制台输出不受影响，服务端无此参数 |
-| `closewait` | int | `0` | 连接拆除前的等待时间（秒） |
+| 参数 | 类型 | 默认值 | 可设定值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `localaddr` | string | `:12948` | 任意 `IP:port` 或 Unix Socket 路径（无 `:` 视为 socket 路径） | 本地监听地址 |
+| `remoteaddr` | string | `vps:29900` | `IP:port` 或 `IP:minport-maxport`（端口段，每次拨号随机选端口） | 服务端地址 |
+| `conn` | int | `1` | `≥1` | 到服务端的 KCP 连接数，本地连接按轮询分配 |
+| `autoexpire` | int | `0` | `0`（关闭轮换）/ `-1`（按堵塞全自动）/ `N>0`（轮换周期秒，且为 `autoexpiremax` 下限） | 端口轮换周期 |
+| `autoexpiremax` | int | `0` | `0`（不随机）/ `M>autoexpire`（随机上限秒） | 轮换随机上限；`-1` 模式不生效 |
+| `scavengettl` | int | `0` | `0`（永不强制关闭，推荐）/ `N>0`（强制回收秒） | 旧连接强制回收时限；`-1` 模式不生效 |
+| `keepalivetolerance` | int | `2` | `≥1`，且 `keepalive × keepalivetolerance < 30` | 判定端口堵塞可容忍的连续未应答心跳数，仅 `autoexpire: -1` 生效 |
+| `logsize` | int | `0` | `0`（不限长度）/ `N>0`（KB） | 运行日志文件大小上限，写满丢弃最旧整行；仅对 `-log` 文件生效，服务端无此参数 |
+| `closewait` | int | `0` | `≥0`（秒） | 连接拆除前等待时间（服务端默认 `30`） |
+| `key` | string | `it's a secrect` | 同服务端 | 预共享密钥 |
+| `crypt` | string | `aes` | 同服务端 | 加密方式 |
+| `mode` | string | `fast` | 同服务端 | 加速模式 |
+| `mtu` | int | `1350` | 建议 `1000`~`1400` | UDP MTU |
+| `sndwnd` | int | `128` | `≥1`（包数量） | 发送窗口（默认值与服务端不同） |
+| `rcvwnd` | int | `512` | `≥1`（包数量） | 接收窗口（默认值与服务端不同） |
+| `datashard` | int | `10` | `datashard + parityshard ≤ 255` | FEC 数据分片 |
+| `parityshard` | int | `3` | 同上 | FEC 冗余分片 |
+| `dscp` | int | `0` | `0`~`63` | DSCP |
+| `nocomp` | bool | `false` | `true`/`false` | 关闭压缩 |
+| `acknodelay` | bool | `false` | `true`/`false` | 立即 ACK（manual 相关） |
+| `nodelay` | int | `0` | `0`/`1` | 低延迟开关（manual） |
+| `interval` | int | `50` | `10`~`60`（毫秒） | 重传间隔（manual） |
+| `resend` | int | `0` | `0`/`1`/`2` | 快速重传（manual） |
+| `nc` | int | `0` | `0`/`1` | 拥塞控制开关（manual） |
+| `sockbuf` | int | `4194304` | 一般 `4MB`~`64MB`（字节） | socket 缓冲区 |
+| `smuxver` | int | `1` | `1`/`2` | smux 版本 |
+| `smuxbuf` | int | `4194304` | 字节 | smux 会话缓冲 |
+| `streambuf` | int | `2097152` | 字节 | smux 单流缓冲 |
+| `keepalive` | int | `10` | `>0`（秒） | 心跳间隔 |
+| `log` | string | `""` | 文件路径（空=stderr） | 日志文件 |
+| `snmplog` / `snmpperiod` | string / int | `""` / `60` | 文件路径（空=不记录）/ `>0`（秒） | 流量统计 |
+| `quiet` | bool | `false` | `true`/`false` | 屏蔽 stream 日志 |
+| `tcp` | bool | `false` | `true`/`false` | TCP 伪装（仅 Linux） |
+| `pprof` | bool | `false` | `true`/`false` | 性能剖析 |
+| `qpp` / `qpp-count` | bool / int | `false` / `61` | 同服务端 | QPP 垫层 |
+
+> 客户端独有参数及默认值差异汇总：除 `localaddr` / `remoteaddr` / `conn` / `autoexpire` / `autoexpiremax` / `scavengettl` / `keepalivetolerance` / `logsize` 外，客户端 `sndwnd`（128）、`rcvwnd`（512）、`closewait`（0）默认值与服务端不同。丢包测试参数（`losstest` 等）见下方「丢包测试 · 参数说明」。
 
 </details>
 
