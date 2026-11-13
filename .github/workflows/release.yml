@@ -14,8 +14,8 @@
 #   3. push: tags 'v*'            —— 手工推 tag 时按 tag 发布
 #   4. workflow_dispatch          —— 手动发布，或 dry_run 预演（只构建不发布）
 #
-# 自动路径（1 与 2）额外要过内容闸门：自上一个 tag 以来有任何文件变更（代码 / 文档 / 依赖均可）
-# 才发布，避免对无实质改动的 push 空跑发布。
+# 自动路径（1 与 2）额外要过内容闸门：自上一个 tag 以来有非文档文件变更才发布；
+# 完全无变更、或仅修改 .md 文档（非代码提交）则跳过，避免空跑发布。
 #
 # 产物矩阵、命名、checksums.txt 格式全部复刻既有 Release，构建逻辑在
 # .github/scripts/build-dist.sh（本地也可执行同一脚本做校验）。
@@ -159,15 +159,22 @@ jobs:
                 skip='true'
                 reason='仓库没有可对比的上一个 tag，自动路径不做猜测式发布；请手动触发并指定 tag'
               else
-                # 放宽判定：只要自上一 tag 以来有任何文件变更（代码 / 文档 / 依赖均可）即视为需发布；
-                # 仍保留「完全无变更则不空跑」的兜底，避免对无实质改动的 push 重复发版。
+                # 放宽判定：只要自上一 tag 以来有任何非文档文件变更即视为需发布；
+                # 仍保留两道兜底：①完全无变更则不空跑；②仅修改 .md 文档（非代码提交）不发版。
                 changed="$(git diff --name-only "${prev_tag}..${head_sha}")"
                 if [ -z "${changed}" ]; then
                   skip='true'
                   reason="自 ${prev_tag} 以来没有任何文件变化，不发布新版本"
                 else
-                  echo "变更文件（${prev_tag}..HEAD，共 $(printf '%s\n' "${changed}" | wc -l | tr -d ' ') 个）："
-                  echo "${changed}"
+                  # 过滤掉 markdown 文档：仅余 .md 变更则视为非代码提交，跳过发布
+                  non_md_changed="$(printf '%s\n' "${changed}" | grep -v -E '\.md$' || true)"
+                  if [ -z "${non_md_changed}" ]; then
+                    skip='true'
+                    reason="自 ${prev_tag} 以来仅有 .md 文档变更，不发布新版本"
+                  else
+                    echo "变更文件（${prev_tag}..HEAD，共 $(printf '%s\n' "${changed}" | wc -l | tr -d ' ') 个，其中非文档变更 $(printf '%s\n' "${non_md_changed}" | wc -l | tr -d ' ') 个）："
+                    echo "${changed}"
+                  fi
                 fi
               fi
             fi
