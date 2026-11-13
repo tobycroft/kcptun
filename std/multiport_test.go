@@ -2,52 +2,54 @@
 
 package std
 
-import (
-	"fmt"
-	"regexp"
-	"strconv"
-	"testing"
-)
+import "testing"
 
-func TestDial(t *testing.T) {
-	reg := regexp.MustCompile(`(.*)\:([0-9]{1,5})-?([0-9]{1,5})?`)
-	matches := reg.FindStringSubmatch("www.unknown.unknown:20000-21000")
-	for i := 0; i < len(matches); i++ {
-		fmt.Println(matches[i])
+func TestParseMultiPort(t *testing.T) {
+	tests := []struct {
+		addr string
+		want MultiPort
+	}{
+		{"example.com:29900-30100", MultiPort{Host: "example.com", MinPort: 29900, MaxPort: 30100}},
+		{"192.0.2.1:29900", MultiPort{Host: "192.0.2.1", MinPort: 29900, MaxPort: 29900}},
+		{":29900", MultiPort{MinPort: 29900, MaxPort: 29900}},
+		{":1-65535", MultiPort{MinPort: 1, MaxPort: 65535}},
+		{"[2001:db8::1]:65535", MultiPort{Host: "[2001:db8::1]", MinPort: 65535, MaxPort: 65535}},
+		{"[::]:29900-30100", MultiPort{Host: "[::]", MinPort: 29900, MaxPort: 30100}},
+		{"[fe80::1%eth0]:29900-30100", MultiPort{Host: "[fe80::1%eth0]", MinPort: 29900, MaxPort: 30100}},
 	}
 
-	minPort, err := strconv.Atoi(matches[2])
-	if err != nil {
-		t.Fatal(err)
+	for _, tt := range tests {
+		t.Run(tt.addr, func(t *testing.T) {
+			got, err := ParseMultiPort(tt.addr)
+			if err != nil {
+				t.Fatalf("ParseMultiPort(%q): %v", tt.addr, err)
+			}
+			if *got != tt.want {
+				t.Errorf("ParseMultiPort(%q) = %+v, want %+v", tt.addr, *got, tt.want)
+			}
+		})
 	}
-	maxPort, err := strconv.Atoi(matches[3])
-	if err != nil {
-		t.Fatal(err)
+}
+
+func TestParseMultiPortRejectsInvalidPorts(t *testing.T) {
+	for _, addr := range []string{
+		"example.com:",
+		"example.com:0",
+		"example.com:65536",
+		"example.com:100000",
+		"example.com:29900junk",
+		"example.com:29900-",
+		"example.com:29900-30100junk",
+		"example.com:29900-30100-30200",
+		"example.com:29900-65536",
+		"example.com:30100-29900",
+		"[2001:db8::1]:29900junk",
+		"[2001:db8::1]:29900-",
+	} {
+		t.Run(addr, func(t *testing.T) {
+			if got, err := ParseMultiPort(addr); err == nil {
+				t.Errorf("ParseMultiPort(%q) = %+v, want an error", addr, got)
+			}
+		})
 	}
-
-	t.Log("minport:", minPort)
-	t.Log("maxport:", maxPort)
-
-	remoteAddr := fmt.Sprintf("%v:%v", matches[1], uint64(minPort)+1000%uint64(maxPort-minPort+1))
-
-	t.Log("RemoteAddr:", remoteAddr)
-
-	testcase2 := "1.2.3.4:20000"
-	matches = reg.FindStringSubmatch(testcase2)
-	for i := 0; i < len(matches); i++ {
-		t.Log(testcase2, "submatch", i, matches[i])
-	}
-
-	testcase3 := ":20000-20001"
-	matches = reg.FindStringSubmatch(testcase3)
-	for i := 0; i < len(matches); i++ {
-		t.Log(testcase3, "submatch", i, matches[i])
-	}
-
-	testcase4 := ":20000"
-	matches = reg.FindStringSubmatch(testcase4)
-	for i := 0; i < len(matches); i++ {
-		t.Log(testcase4, "submatch", i, matches[i])
-	}
-
 }
