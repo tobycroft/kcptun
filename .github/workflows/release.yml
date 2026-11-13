@@ -5,8 +5,8 @@
 #      为何需要它：实测（合并提交 c0366e8e）GITHUB_TOKEN 合并产生的 push 不会
 #      再触发任何工作流（GitHub 防循环抑制），所以自动合并后的发布靠 workflow_run 驱动。
 #   2. push: master 任意提交 —— 人工用 PAT / 本地合并后的自动发布入口。
-#      不在 job 级 if 里做提交信息启发式判断：依赖是否真的变了，由作业内的
-#      内容闸门比较 prev_tag..HEAD 的 go.mod / go.sum 作权威判定（避免靠关键字、
+#      不在 job 级 if 里做提交信息启发式判断：是否需要发布，由作业内的
+#      内容闸门比较 prev_tag..HEAD 的文件变更作权威判定（避免靠关键字、
 #      也避免为了触发发布而写误导性提交标题）。
 #      （注：不要在 job 级 if 里访问 payload 中不存在的属性，例如 push 事件的
 #       head_commit.author.login（只有 name/email/username）与 ref_type（仅 create/delete 有）；
@@ -14,8 +14,8 @@
 #   3. push: tags 'v*'            —— 手工推 tag 时按 tag 发布
 #   4. workflow_dispatch          —— 手动发布，或 dry_run 预演（只构建不发布）
 #
-# 自动路径（1 与 2）额外要过内容闸门：自上一个 tag 以来 go.mod / go.sum 必须真的变了才发布，
-# 避免空跑发布。
+# 自动路径（1 与 2）额外要过内容闸门：自上一个 tag 以来有任何文件变更（代码 / 文档 / 依赖均可）
+# 才发布，避免对无实质改动的 push 空跑发布。
 #
 # 产物矩阵、命名、checksums.txt 格式全部复刻既有 Release，构建逻辑在
 # .github/scripts/build-dist.sh（本地也可执行同一脚本做校验）。
@@ -151,7 +151,7 @@ jobs:
           # （workflow_run 事件的 github.sha 是 PR 提交而非 master 合并提交，不能用）
           head_sha="$(git rev-parse HEAD)"
 
-          # 内容闸门：自动路径必须真的有 go.mod / go.sum 变更（推 tag 与手动触发属显式意图，不受限）
+          # 内容闸门：自动路径需自上一 tag 以来有任何文件变更才发布（推 tag 与手动触发属显式意图，不受限）
           if [ -z "${skip}" ]; then
             if [ '${{ github.event_name }}' = 'workflow_run' ] ||
                { [ '${{ github.event_name }}' = 'push' ] && [ "${is_tag_push}" != 'true' ]; }; then
@@ -159,12 +159,15 @@ jobs:
                 skip='true'
                 reason='仓库没有可对比的上一个 tag，自动路径不做猜测式发布；请手动触发并指定 tag'
               else
-                dep_changed="$(git diff --name-only "${prev_tag}..${head_sha}" -- go.mod go.sum)"
-                if [ -z "${dep_changed}" ]; then
+                # 放宽判定：只要自上一 tag 以来有任何文件变更（代码 / 文档 / 依赖均可）即视为需发布；
+                # 仍保留「完全无变更则不空跑」的兜底，避免对无实质改动的 push 重复发版。
+                changed="$(git diff --name-only "${prev_tag}..${head_sha}")"
+                if [ -z "${changed}" ]; then
                   skip='true'
-                  reason="自 ${prev_tag} 以来 go.mod / go.sum 没有变化，不发布新版本"
+                  reason="自 ${prev_tag} 以来没有任何文件变化，不发布新版本"
                 else
-                  echo "依赖变更文件：${dep_changed}"
+                  echo "变更文件（${prev_tag}..HEAD，共 $(printf '%s\n' "${changed}" | wc -l | tr -d ' ') 个）："
+                  echo "${changed}"
                 fi
               fi
             fi
