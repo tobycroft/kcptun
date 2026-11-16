@@ -80,8 +80,8 @@ github.com/xtaci/lossyconn v1.1.0 h1:rXMYEzd9rA9GxaVKO7XMoOZfzZUPYQyt4HwBHiAhMME
 github.com/xtaci/lossyconn v1.1.0/go.mod h1:HpMP7DB2CyokmAh4lp0EQnnWhmycP/TvwBGzvuie+H0=
 github.com/xtaci/qpp v1.1.25 h1:gwCK0jhokbuFkcQbIXNGzIxejCVn32S6x7matdlCqmg=
 github.com/xtaci/qpp v1.1.25/go.mod h1:DI0dcoZ+qu4ze5C0hkt8grLfTVqBiZ3hXTimGyg5TTI=
-github.com/xtaci/smux v1.5.59 h1:Dooh1SMPfbMo1yoKAmiZXYpxuPac59o+ftI1LYOu72U=
-github.com/xtaci/smux v1.5.59/go.mod h1:4a0pmNZcNJczCxNBibsxemErdgh0os4H4R1Eic2a0tA=
+github.com/xtaci/smux v1.5.60 h1:LxugALMdZQXOlWFyn3pgs8KS88VwtNgYD6GF1b2Ja7A=
+github.com/xtaci/smux v1.5.60/go.mod h1:4a0pmNZcNJczCxNBibsxemErdgh0os4H4R1Eic2a0tA=
 github.com/xtaci/tcpraw v1.2.32 h1:wdJxd+9IaxGSaPK6luCLIdCkW/8TUQ6Vm872Ctq9L18=
 github.com/xtaci/tcpraw v1.2.32/go.mod h1:D2934PQEqknT1iPhprdvpQ94x9pDO3zXQmZR/el+xMY=
 go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
